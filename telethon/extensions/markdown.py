@@ -4,15 +4,13 @@ for use within the library, which attempts to handle emojies correctly,
 since they seem to count as two characters and it's a bit strange.
 """
 import re
-import struct
 
+from ..helpers import add_surrogate, del_surrogate
 from ..tl import TLObject
-
 from ..tl.types import (
     MessageEntityBold, MessageEntityItalic, MessageEntityCode,
-    MessageEntityPre, MessageEntityTextUrl
-)
-
+    MessageEntityPre, MessageEntityTextUrl, MessageEntityMentionName
+    )
 
 DEFAULT_DELIMITERS = {
     '**': MessageEntityBold,
@@ -25,19 +23,6 @@ DEFAULT_URL_RE = re.compile(r'\[([\S\s]+?)\]\((.+?)\)')
 DEFAULT_URL_FORMAT = '[{0}]({1})'
 
 
-def _add_surrogate(text):
-    return ''.join(
-        # SMP -> Surrogate Pairs (Telegram offsets are calculated with these).
-        # See https://en.wikipedia.org/wiki/Plane_(Unicode)#Overview for more.
-        ''.join(chr(y) for y in struct.unpack('<HH', x.encode('utf-16le')))
-        if (0x10000 <= ord(x) <= 0x10FFFF) else x for x in text
-    )
-
-
-def _del_surrogate(text):
-    return text.encode('utf-16', 'surrogatepass').decode('utf-16')
-
-
 def parse(message, delimiters=None, url_re=None):
     """
     Parses the given markdown message and returns its stripped representation
@@ -48,6 +33,9 @@ def parse(message, delimiters=None, url_re=None):
     :param url_re: the URL bytes regex to be used. Must have two groups.
     :return: a tuple consisting of (clean message, [message entities]).
     """
+    if not message:
+        return message, []
+
     if url_re is None:
         url_re = DEFAULT_URL_RE
     elif isinstance(url_re, str):
@@ -66,7 +54,7 @@ def parse(message, delimiters=None, url_re=None):
 
     # Work on byte level with the utf-16le encoding to get the offsets right.
     # The offset will just be half the index we're at.
-    message = _add_surrogate(message)
+    message = add_surrogate(message)
     while i < len(message):
         if url_re and current is None:
             # If we're not inside a previous match since Telegram doesn't allow
@@ -82,7 +70,7 @@ def parse(message, delimiters=None, url_re=None):
 
                 result.append(MessageEntityTextUrl(
                     offset=url_match.start(), length=len(url_match.group(1)),
-                    url=_del_surrogate(url_match.group(2))
+                    url=del_surrogate(url_match.group(2))
                 ))
                 i += len(url_match.group(1))
                 # Next loop iteration, don't check delimiters, since
@@ -137,7 +125,7 @@ def parse(message, delimiters=None, url_re=None):
             + message[current.offset:]
         )
 
-    return _del_surrogate(message), result
+    return del_surrogate(message), result
 
 
 def unparse(text, entities, delimiters=None, url_fmt=None):
@@ -149,7 +137,7 @@ def unparse(text, entities, delimiters=None, url_fmt=None):
     :param entities: the MessageEntity's applied to the text.
     :return: a markdown-like text representing the combination of both inputs.
     """
-    if not entities:
+    if not text or not entities:
         return text
 
     if not delimiters:
@@ -165,7 +153,7 @@ def unparse(text, entities, delimiters=None, url_fmt=None):
     else:
         entities = tuple(sorted(entities, key=lambda e: e.offset, reverse=True))
 
-    text = _add_surrogate(text)
+    text = add_surrogate(text)
     delimiters = {v: k for k, v in delimiters.items()}
     for entity in entities:
         s = entity.offset
@@ -173,36 +161,17 @@ def unparse(text, entities, delimiters=None, url_fmt=None):
         delimiter = delimiters.get(type(entity), None)
         if delimiter:
             text = text[:s] + delimiter + text[s:e] + delimiter + text[e:]
-        elif isinstance(entity, MessageEntityTextUrl) and url_fmt:
-            text = (
-                text[:s] +
-                _add_surrogate(url_fmt.format(text[s:e], entity.url)) +
-                text[e:]
-            )
+        elif url_fmt:
+            url = None
+            if isinstance(entity, MessageEntityTextUrl):
+                url = entity.url
+            elif isinstance(entity, MessageEntityMentionName):
+                url = 'tg://user?id={}'.format(entity.user_id)
+            if url:
+                text = (
+                    text[:s] +
+                    add_surrogate(url_fmt.format(text[s:e], url)) +
+                    text[e:]
+                )
 
-    return _del_surrogate(text)
-
-
-def get_inner_text(text, entity):
-    """
-    Gets the inner text that's surrounded by the given entity or entities.
-    For instance: text = 'hey!', entity = MessageEntityBold(2, 2) -> 'y!'.
-
-    :param text: the original text.
-    :param entity: the entity or entities that must be matched.
-    :return: a single result or a list of the text surrounded by the entities.
-    """
-    if isinstance(entity, TLObject):
-        entity = (entity,)
-        multiple = True
-    else:
-        multiple = False
-
-    text = _add_surrogate(text)
-    result = []
-    for e in entity:
-        start = e.offset
-        end = e.offset + e.length
-        result.append(_del_surrogate(text[start:end]))
-
-    return result if multiple else result[0]
+    return del_surrogate(text)

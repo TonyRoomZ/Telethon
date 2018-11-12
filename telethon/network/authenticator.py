@@ -11,61 +11,28 @@ from ..tl.types import (
     ServerDHInnerData, ClientDHInnerData, DhGenOk, DhGenRetry, DhGenFail
 )
 from .. import helpers as utils
-from ..crypto import AES, AuthKey, Factorization
-from ..crypto import rsa
+from ..crypto import AES, AuthKey, Factorization, rsa
 from ..errors import SecurityError
 from ..extensions import BinaryReader
-from ..network import MtProtoPlainSender
 from ..tl.functions import (
     ReqPqMultiRequest, ReqDHParamsRequest, SetClientDHParamsRequest
 )
 
 
-def do_authentication(connection, retries=5):
-    """
-    Performs the authentication steps on the given connection.
-    Raises an error if all attempts fail.
-
-    :param connection: the connection to be used (must be connected).
-    :param retries: how many times should we retry on failure.
-    :return:
-    """
-    if not retries or retries < 0:
-        retries = 1
-
-    last_error = None
-    while retries:
-        try:
-            return _do_authentication(connection)
-        except (SecurityError, AssertionError, NotImplementedError) as e:
-            last_error = e
-        retries -= 1
-    raise last_error
-
-
-def _do_authentication(connection):
+async def do_authentication(sender):
     """
     Executes the authentication process with the Telegram servers.
 
-    :param connection: the connection to be used (must be connected).
+    :param sender: a connected `MTProtoPlainSender`.
     :return: returns a (authorization key, time offset) tuple.
     """
-    sender = MtProtoPlainSender(connection)
-
     # Step 1 sending: PQ Request, endianness doesn't matter since it's random
-    req_pq_request = ReqPqMultiRequest(
-        nonce=int.from_bytes(os.urandom(16), 'big', signed=True)
-    )
-    sender.send(bytes(req_pq_request))
-    with BinaryReader(sender.receive()) as reader:
-        req_pq_request.on_response(reader)
+    nonce = int.from_bytes(os.urandom(16), 'big', signed=True)
+    res_pq = await sender.send(ReqPqMultiRequest(nonce))
+    assert isinstance(res_pq, ResPQ), 'Step 1 answer was %s' % res_pq
 
-    res_pq = req_pq_request.result
-    if not isinstance(res_pq, ResPQ):
-        raise AssertionError(res_pq)
-
-    if res_pq.nonce != req_pq_request.nonce:
-        raise SecurityError('Invalid nonce from server')
+    if res_pq.nonce != nonce:
+        raise SecurityError('Step 1 invalid nonce from server')
 
     pq = get_int(res_pq.pq)
 
@@ -91,37 +58,40 @@ def _do_authentication(connection):
 
     if cipher_text is None:
         raise SecurityError(
-            'Could not find a valid key for fingerprints: {}'
+            'Step 2 could not find a valid key for fingerprints: {}'
             .format(', '.join(
                 [str(f) for f in res_pq.server_public_key_fingerprints])
             )
         )
 
-    req_dh_params = ReqDHParamsRequest(
+    server_dh_params = await sender.send(ReqDHParamsRequest(
         nonce=res_pq.nonce,
         server_nonce=res_pq.server_nonce,
         p=p, q=q,
         public_key_fingerprint=target_fingerprint,
         encrypted_data=cipher_text
-    )
-    sender.send(bytes(req_dh_params))
+    ))
 
-    # Step 2 response: DH Exchange
-    with BinaryReader(sender.receive()) as reader:
-        req_dh_params.on_response(reader)
-
-    server_dh_params = req_dh_params.result
-    if isinstance(server_dh_params, ServerDHParamsFail):
-        raise SecurityError('Server DH params fail: TODO')
-
-    if not isinstance(server_dh_params, ServerDHParamsOk):
-        raise AssertionError(server_dh_params)
+    assert isinstance(
+        server_dh_params, (ServerDHParamsOk, ServerDHParamsFail)),\
+        'Step 2.1 answer was %s' % server_dh_params
 
     if server_dh_params.nonce != res_pq.nonce:
-        raise SecurityError('Invalid nonce from server')
+        raise SecurityError('Step 2 invalid nonce from server')
 
     if server_dh_params.server_nonce != res_pq.server_nonce:
-        raise SecurityError('Invalid server nonce from server')
+        raise SecurityError('Step 2 invalid server nonce from server')
+
+    if isinstance(server_dh_params, ServerDHParamsFail):
+        nnh = int.from_bytes(
+            sha1(new_nonce.to_bytes(32, 'little', signed=True)).digest()[4:20],
+            'little', signed=True
+        )
+        if server_dh_params.new_nonce_hash != nnh:
+            raise SecurityError('Step 2 invalid DH fail nonce from server')
+
+    assert isinstance(server_dh_params, ServerDHParamsOk),\
+        'Step 2.2 answer was %s' % server_dh_params
 
     # Step 3 sending: Complete DH Exchange
     key, iv = utils.generate_key_data_from_nonce(
@@ -129,7 +99,7 @@ def _do_authentication(connection):
     )
     if len(server_dh_params.encrypted_answer) % 16 != 0:
         # See PR#453
-        raise SecurityError('AES block size mismatch')
+        raise SecurityError('Step 3 AES block size mismatch')
 
     plain_text_answer = AES.decrypt_ige(
         server_dh_params.encrypted_answer, key, iv
@@ -138,14 +108,14 @@ def _do_authentication(connection):
     with BinaryReader(plain_text_answer) as reader:
         reader.read(20)  # hash sum
         server_dh_inner = reader.tgread_object()
-        if not isinstance(server_dh_inner, ServerDHInnerData):
-            raise AssertionError(server_dh_inner)
+        assert isinstance(server_dh_inner, ServerDHInnerData),\
+            'Step 3 answer was %s' % server_dh_inner
 
     if server_dh_inner.nonce != res_pq.nonce:
-        raise SecurityError('Invalid nonce in encrypted answer')
+        raise SecurityError('Step 3 Invalid nonce in encrypted answer')
 
     if server_dh_inner.server_nonce != res_pq.server_nonce:
-        raise SecurityError('Invalid server nonce in encrypted answer')
+        raise SecurityError('Step 3 Invalid server nonce in encrypted answer')
 
     dh_prime = get_int(server_dh_inner.dh_prime, signed=False)
     g_a = get_int(server_dh_inner.g_a, signed=False)
@@ -169,43 +139,34 @@ def _do_authentication(connection):
     client_dh_encrypted = AES.encrypt_ige(client_dh_inner_hashed, key, iv)
 
     # Prepare Set client DH params
-    set_client_dh = SetClientDHParamsRequest(
+    dh_gen = await sender.send(SetClientDHParamsRequest(
         nonce=res_pq.nonce,
         server_nonce=res_pq.server_nonce,
         encrypted_data=client_dh_encrypted,
-    )
-    sender.send(bytes(set_client_dh))
+    ))
 
-    # Step 3 response: Complete DH Exchange
-    with BinaryReader(sender.receive()) as reader:
-        set_client_dh.on_response(reader)
+    nonce_types = (DhGenOk, DhGenRetry, DhGenFail)
+    assert isinstance(dh_gen, nonce_types), 'Step 3.1 answer was %s' % dh_gen
+    name = dh_gen.__class__.__name__
+    if dh_gen.nonce != res_pq.nonce:
+        raise SecurityError('Step 3 invalid {} nonce from server'.format(name))
 
-    dh_gen = set_client_dh.result
-    if isinstance(dh_gen, DhGenOk):
-        if dh_gen.nonce != res_pq.nonce:
-            raise SecurityError('Invalid nonce from server')
+    if dh_gen.server_nonce != res_pq.server_nonce:
+        raise SecurityError(
+            'Step 3 invalid {} server nonce from server'.format(name))
 
-        if dh_gen.server_nonce != res_pq.server_nonce:
-            raise SecurityError('Invalid server nonce from server')
+    auth_key = AuthKey(rsa.get_byte_array(gab))
+    nonce_number = 1 + nonce_types.index(type(dh_gen))
+    new_nonce_hash = auth_key.calc_new_nonce_hash(new_nonce, nonce_number)
 
-        auth_key = AuthKey(rsa.get_byte_array(gab))
-        new_nonce_hash = int.from_bytes(
-            auth_key.calc_new_nonce_hash(new_nonce, 1), 'little', signed=True
-        )
+    dh_hash = getattr(dh_gen, 'new_nonce_hash{}'.format(nonce_number))
+    if dh_hash != new_nonce_hash:
+        raise SecurityError('Step 3 invalid new nonce hash')
 
-        if dh_gen.new_nonce_hash1 != new_nonce_hash:
-            raise SecurityError('Invalid new nonce hash')
+    if not isinstance(dh_gen, DhGenOk):
+        raise AssertionError('Step 3.2 answer was %s' % dh_gen)
 
-        return auth_key, time_offset
-
-    elif isinstance(dh_gen, DhGenRetry):
-        raise NotImplementedError('DhGenRetry')
-
-    elif isinstance(dh_gen, DhGenFail):
-        raise NotImplementedError('DhGenFail')
-
-    else:
-        raise NotImplementedError('DH Gen unknown: {}'.format(dh_gen))
+    return auth_key, time_offset
 
 
 def get_int(byte_array, signed=True):

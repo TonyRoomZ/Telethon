@@ -1,45 +1,17 @@
+import abc
 import struct
-from datetime import datetime, date
-from threading import Event
+from datetime import datetime, date, timedelta
 
 
 class TLObject:
-    def __init__(self):
-        self.rpc_error = None
-        self.result = None
+    CONSTRUCTOR_ID = None
+    SUBCLASS_OF_ID = None
 
-        # These should be overrode
-        self.content_related = False  # Only requests/functions/queries are
-        
-        # Internal parameter to tell pickler in which state Event object was
-        self._event_is_set = False 
-        self._set_event()
-
-    def _set_event(self):
-        self.confirm_received = Event()
-        
-        # Set Event state to 'set' if needed
-        if self._event_is_set:
-            self.confirm_received.set()
-
-    def __getstate__(self):
-        # Save state of the Event object 
-        self._event_is_set = self.confirm_received.is_set()
-        
-        # Exclude Event object from dict and return new state
-        new_dct = dict(self.__dict__)
-        del new_dct["confirm_received"]
-        return new_dct
-
-    def __setstate__(self, state):
-        self.__dict__ = state
-        self._set_event()
-
-    # These should not be overrode
     @staticmethod
     def pretty_format(obj, indent=None):
-        """Pretty formats the given object as a string which is returned.
-           If indent is None, a single line will be returned.
+        """
+        Pretty formats the given object as a string which is returned.
+        If indent is None, a single line will be returned.
         """
         if indent is None:
             if isinstance(obj, TLObject):
@@ -55,10 +27,6 @@ class TLObject:
             elif hasattr(obj, '__iter__'):
                 return '[{}]'.format(
                     ', '.join(TLObject.pretty_format(x) for x in obj)
-                )
-            elif isinstance(obj, datetime):
-                return 'datetime.utcfromtimestamp({})'.format(
-                    int(obj.timestamp())
                 )
             else:
                 return repr(obj)
@@ -100,11 +68,6 @@ class TLObject:
                 indent -= 1
                 result.append('\t' * indent)
                 result.append(']')
-
-            elif isinstance(obj, datetime):
-                result.append('datetime.utcfromtimestamp(')
-                result.append(repr(int(obj.timestamp())))
-                result.append(')')
 
             else:
                 result.append(repr(obj))
@@ -157,15 +120,14 @@ class TLObject:
             dt = int(datetime(dt.year, dt.month, dt.day).timestamp())
         elif isinstance(dt, float):
             dt = int(dt)
+        elif isinstance(dt, timedelta):
+            # Timezones are tricky. datetime.now() + ... timestamp() works
+            dt = int((datetime.now() + dt).timestamp())
 
         if isinstance(dt, int):
             return struct.pack('<I', dt)
 
         raise TypeError('Cannot interpret "{}" as a date.'.format(dt))
-
-    # These are nearly always the same for all subclasses
-    def on_response(self, reader):
-        self.result = reader.tgread_object()
 
     def __eq__(self, o):
         return isinstance(o, type(self)) and self.to_dict() == o.to_dict()
@@ -179,16 +141,24 @@ class TLObject:
     def stringify(self):
         return TLObject.pretty_format(self, indent=0)
 
-    # These should be overrode
-    def resolve(self, client, utils):
-        pass
-
     def to_dict(self):
-        return {}
+        raise NotImplementedError
 
     def __bytes__(self):
-        return b''
+        raise NotImplementedError
 
     @classmethod
     def from_reader(cls, reader):
-        return TLObject()
+        raise NotImplementedError
+
+
+class TLRequest(TLObject):
+    """
+    Represents a content-related `TLObject` (a request that can be sent).
+    """
+    @staticmethod
+    def read_result(reader):
+        return reader.tgread_object()
+
+    async def resolve(self, client, utils):
+        pass

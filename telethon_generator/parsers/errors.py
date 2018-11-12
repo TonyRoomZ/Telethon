@@ -28,6 +28,7 @@ KNOWN_CODES = {
 CAPTURE_NAMES = {
     'FloodWaitError': 'seconds',
     'FloodTestPhoneWaitError': 'seconds',
+    'TakeoutInitDelayError': 'seconds',
     'FileMigrateError': 'new_dc',
     'NetworkMigrateError': 'new_dc',
     'PhoneMigrateError': 'new_dc',
@@ -89,7 +90,7 @@ def parse_errors(json_file, descriptions_file):
 
     The method yields `Error` instances as a result.
     """
-    with open(json_file, encoding='utf-8') as f:
+    with open(json_file, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
     errors = defaultdict(set)
@@ -97,7 +98,7 @@ def parse_errors(json_file, descriptions_file):
     # PWRTelegram's API doesn't return all errors, which we do need here.
     # Add some special known-cases manually first.
     errors[420].update((
-        'FLOOD_WAIT_X', 'FLOOD_TEST_PHONE_WAIT_X'
+        'FLOOD_WAIT_X', 'FLOOD_TEST_PHONE_WAIT_X', 'TAKEOUT_INIT_DELAY_X'
     ))
     errors[401].update((
         'AUTH_KEY_INVALID', 'SESSION_EXPIRED', 'SESSION_REVOKED'
@@ -123,7 +124,7 @@ def parse_errors(json_file, descriptions_file):
     # Prefer the descriptions that are related with Telethon way of coding
     # to those that PWRTelegram's API provides.
     telethon_descriptions = {}
-    with open(descriptions_file, encoding='utf-8') as f:
+    with open(descriptions_file, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith('#'):

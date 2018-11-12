@@ -43,6 +43,10 @@ class MemorySession(Session):
         self._port = port
 
     @property
+    def dc_id(self):
+        return self._dc_id
+
+    @property
     def server_address(self):
         return self._server_address
 
@@ -118,6 +122,8 @@ class MemorySession(Session):
             entities = tlo
         else:
             entities = []
+            if hasattr(tlo, 'user'):
+                entities.append(tlo.user)
             if hasattr(tlo, 'chats') and utils.is_list_like(tlo.chats):
                 entities.extend(tlo.chats)
             if hasattr(tlo, 'users') and utils.is_list_like(tlo.users):
@@ -192,9 +198,13 @@ class MemorySession(Session):
             if phone:
                 result = self.get_entity_rows_by_phone(phone)
             else:
-                username, _ = utils.parse_username(key)
-                if username:
+                username, invite = utils.parse_username(key)
+                if username and not invite:
                     result = self.get_entity_rows_by_username(username)
+                else:
+                    key = utils.resolve_invite_link(key)[1]
+                    if key:
+                        result = self.get_entity_rows_by_id(key, exact=False)
 
         elif isinstance(key, int):
             result = self.get_entity_rows_by_id(key, exact)
@@ -218,13 +228,13 @@ class MemorySession(Session):
     def cache_file(self, md5_digest, file_size, instance):
         if not isinstance(instance, (InputDocument, InputPhoto)):
             raise TypeError('Cannot cache %s instance' % type(instance))
-        key = (md5_digest, file_size, _SentFileType.from_type(instance))
+        key = (md5_digest, file_size, _SentFileType.from_type(type(instance)))
         value = (instance.id, instance.access_hash)
         self._files[key] = value
 
     def get_file(self, md5_digest, file_size, cls):
         key = (md5_digest, file_size, _SentFileType.from_type(cls))
         try:
-            return cls(self._files[key])
+            return cls(*self._files[key])
         except KeyError:
             return None

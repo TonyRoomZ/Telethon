@@ -1,10 +1,8 @@
 import datetime
 import json
 import os
-import sqlite3
 from base64 import b64decode
 from os.path import isfile as file_exists
-from threading import Lock, RLock
 
 from telethon.tl import types
 from .memory import MemorySession, _SentFileType
@@ -13,6 +11,11 @@ from ..crypto import AuthKey
 from ..tl.types import (
     InputPhoto, InputDocument, PeerUser, PeerChat, PeerChannel
 )
+
+try:
+    import sqlite3
+except ImportError:
+    sqlite3 = None
 
 EXTENSION = '.session'
 CURRENT_VERSION = 4  # database version
@@ -28,12 +31,10 @@ class SQLiteSession(MemorySession):
     """
 
     def __init__(self, session_id=None):
+        if sqlite3 is None:
+            raise ValueError('sqlite3 is not installed')
+
         super().__init__()
-        """session_user_id should either be a string or another Session.
-           Note that if another session is given, only parameters like
-           those required to init a connection will be copied.
-        """
-        # These values will NOT be saved
         self.filename = ':memory:'
         self.save_entities = True
 
@@ -42,12 +43,8 @@ class SQLiteSession(MemorySession):
             if not self.filename.endswith(EXTENSION):
                 self.filename += EXTENSION
 
-        # Cross-thread safety
-        self._seq_no_lock = Lock()
-        self._msg_id_lock = Lock()
-        self._db_lock = RLock()
-
         # Migrating from .json -> SQL
+        # TODO ^ Deprecate
         entities = self._check_migrate_json()
 
         self._conn = None
@@ -129,7 +126,7 @@ class SQLiteSession(MemorySession):
     def _check_migrate_json(self):
         if file_exists(self.filename):
             try:
-                with open(self.filename, encoding='utf-8') as f:
+                with open(self.filename, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 self.delete()  # Delete JSON file to create database
 
@@ -179,16 +176,8 @@ class SQLiteSession(MemorySession):
 
     @staticmethod
     def _create_table(c, *definitions):
-        """
-        Creates a table given its definition 'name (columns).
-        If the sqlite version is >= 3.8.2, it will use "without rowid".
-        See http://www.sqlite.org/releaselog/3_8_2.html.
-        """
-        required = (3, 8, 2)
-        sqlite_v = tuple(int(x) for x in sqlite3.sqlite_version.split('.'))
-        extra = ' without rowid' if sqlite_v >= required else ''
         for definition in definitions:
-            c.execute('create table {}{}'.format(definition, extra))
+            c.execute('create table {}'.format(definition))
 
     # Data from sessions should be kept as properties
     # not to fetch the database every time we need it
@@ -197,14 +186,11 @@ class SQLiteSession(MemorySession):
         self._update_session_table()
 
         # Fetch the auth_key corresponding to this data center
-        c = self._cursor()
-        c.execute('select auth_key from sessions')
-        tuple_ = c.fetchone()
-        if tuple_ and tuple_[0]:
-            self._auth_key = AuthKey(data=tuple_[0])
+        row = self._execute('select auth_key from sessions')
+        if row and row[0]:
+            self._auth_key = AuthKey(data=row[0])
         else:
             self._auth_key = None
-        c.close()
 
     @MemorySession.auth_key.setter
     def auth_key(self, value):
@@ -212,61 +198,67 @@ class SQLiteSession(MemorySession):
         self._update_session_table()
 
     def _update_session_table(self):
-        with self._db_lock:
-            c = self._cursor()
-            # While we can save multiple rows into the sessions table
-            # currently we only want to keep ONE as the tables don't
-            # tell us which auth_key's are usable and will work. Needs
-            # some more work before being able to save auth_key's for
-            # multiple DCs. Probably done differently.
-            c.execute('delete from sessions')
-            c.execute('insert or replace into sessions values (?,?,?,?)', (
-                self._dc_id,
-                self._server_address,
-                self._port,
-                self._auth_key.key if self._auth_key else b''
-            ))
-            c.close()
+        c = self._cursor()
+        # While we can save multiple rows into the sessions table
+        # currently we only want to keep ONE as the tables don't
+        # tell us which auth_key's are usable and will work. Needs
+        # some more work before being able to save auth_key's for
+        # multiple DCs. Probably done differently.
+        c.execute('delete from sessions')
+        c.execute('insert or replace into sessions values (?,?,?,?)', (
+            self._dc_id,
+            self._server_address,
+            self._port,
+            self._auth_key.key if self._auth_key else b''
+        ))
+        c.close()
 
     def get_update_state(self, entity_id):
-        c = self._cursor()
-        row = c.execute('select pts, qts, date, seq from update_state '
-                        'where id = ?', (entity_id,)).fetchone()
-        c.close()
+        row = self._execute('select pts, qts, date, seq from update_state '
+                            'where id = ?', entity_id)
         if row:
             pts, qts, date, seq = row
-            date = datetime.datetime.utcfromtimestamp(date)
+            date = datetime.datetime.fromtimestamp(
+                date, tz=datetime.timezone.utc)
             return types.updates.State(pts, qts, date, seq, unread_count=0)
 
     def set_update_state(self, entity_id, state):
-        with self._db_lock:
-            c = self._cursor()
-            c.execute('insert or replace into update_state values (?,?,?,?,?)',
-                      (entity_id, state.pts, state.qts,
-                       state.date.timestamp(), state.seq))
-            c.close()
-            self.save()
+        self._execute('insert or replace into update_state values (?,?,?,?,?)',
+                      entity_id, state.pts, state.qts,
+                      state.date.timestamp(), state.seq)
 
     def save(self):
         """Saves the current session object as session_user_id.session"""
-        with self._db_lock:
+        # This is a no-op if there are no changes to commit, so there's
+        # no need for us to keep track of an "unsaved changes" variable.
+        if self._conn is not None:
             self._conn.commit()
 
     def _cursor(self):
         """Asserts that the connection is open and returns a cursor"""
-        with self._db_lock:
-            if self._conn is None:
-                self._conn = sqlite3.connect(self.filename,
-                                             check_same_thread=False)
-            return self._conn.cursor()
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.filename,
+                                         check_same_thread=False)
+        return self._conn.cursor()
+
+    def _execute(self, stmt, *values):
+        """
+        Gets a cursor, executes `stmt` and closes the cursor,
+        fetching one row afterwards and returning its result.
+        """
+        c = self._cursor()
+        try:
+            return c.execute(stmt, values).fetchone()
+        finally:
+            c.close()
 
     def close(self):
         """Closes the connection unless we're working in-memory"""
         if self.filename != ':memory:':
-            with self._db_lock:
-                if self._conn is not None:
-                    self._conn.close()
-                    self._conn = None
+            if self._conn is not None:
+                self._conn.commit()
+                self._conn.close()
+                self._conn = None
 
     def delete(self):
         """Deletes the current session file"""
@@ -301,64 +293,56 @@ class SQLiteSession(MemorySession):
         if not rows:
             return
 
-        with self._db_lock:
-            self._cursor().executemany(
-                'insert or replace into entities values (?,?,?,?,?)', rows
-            )
-            self.save()
-
-    def _fetchone_entity(self, query, args):
         c = self._cursor()
-        c.execute(query, args)
-        return c.fetchone()
+        try:
+            c.executemany(
+                'insert or replace into entities values (?,?,?,?,?)', rows)
+        finally:
+            c.close()
 
     def get_entity_rows_by_phone(self, phone):
-        return self._fetchone_entity(
-            'select id, hash from entities where phone=?', (phone,))
+        return self._execute(
+            'select id, hash from entities where phone = ?', phone)
 
     def get_entity_rows_by_username(self, username):
-        return self._fetchone_entity(
-            'select id, hash from entities where username=?', (username,))
+        return self._execute(
+            'select id, hash from entities where username = ?', username)
 
     def get_entity_rows_by_name(self, name):
-        return self._fetchone_entity(
-            'select id, hash from entities where name=?', (name,))
+        return self._execute(
+            'select id, hash from entities where name = ?', name)
 
     def get_entity_rows_by_id(self, id, exact=True):
         if exact:
-            return self._fetchone_entity(
-                'select id, hash from entities where id=?', (id,))
+            return self._execute(
+                'select id, hash from entities where id = ?', id)
         else:
-            ids = (
+            return self._execute(
+                'select id, hash from entities where id in (?,?,?)',
                 utils.get_peer_id(PeerUser(id)),
                 utils.get_peer_id(PeerChat(id)),
                 utils.get_peer_id(PeerChannel(id))
-            )
-            return self._fetchone_entity(
-                'select id, hash from entities where id in (?,?,?)', ids
             )
 
     # File processing
 
     def get_file(self, md5_digest, file_size, cls):
-        tuple_ = self._cursor().execute(
+        row = self._execute(
             'select id, hash from sent_files '
             'where md5_digest = ? and file_size = ? and type = ?',
-            (md5_digest, file_size, _SentFileType.from_type(cls).value)
-        ).fetchone()
-        if tuple_:
+            md5_digest, file_size, _SentFileType.from_type(cls).value
+        )
+        if row:
             # Both allowed classes have (id, access_hash) as parameters
-            return cls(tuple_[0], tuple_[1])
+            return cls(row[0], row[1])
 
     def cache_file(self, md5_digest, file_size, instance):
         if not isinstance(instance, (InputDocument, InputPhoto)):
             raise TypeError('Cannot cache %s instance' % type(instance))
 
-        with self._db_lock:
-            self._cursor().execute(
-                'insert or replace into sent_files values (?,?,?,?,?)', (
-                    md5_digest, file_size,
-                    _SentFileType.from_type(type(instance)).value,
-                    instance.id, instance.access_hash
-            ))
-            self.save()
+        self._execute(
+            'insert or replace into sent_files values (?,?,?,?,?)',
+            md5_digest, file_size,
+            _SentFileType.from_type(type(instance)).value,
+            instance.id, instance.access_hash
+        )

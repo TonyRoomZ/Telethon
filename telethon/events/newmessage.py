@@ -1,16 +1,8 @@
-import abc
-import datetime
-import itertools
+import asyncio
 import re
-import warnings
 
-from .. import utils
-from ..errors import RPCError
-from ..extensions import markdown
-from ..tl import TLObject, types, functions
-
-
-from .common import EventBuilder, EventCommon, name_inner_event
+from .common import EventBuilder, EventCommon, name_inner_event, _into_id_set
+from ..tl import types
 
 
 @name_inner_event
@@ -27,20 +19,43 @@ class NewMessage(EventBuilder):
             If set to ``True``, only **outgoing** messages will be handled.
             Mutually exclusive with ``incoming`` (can only set one of either).
 
+        from_users (`entity`, optional):
+            Unlike `chats`, this parameter filters the *sender* of the message.
+            That is, only messages *sent by this user* will be handled. Use
+            `chats` if you want private messages with this/these users.
+            `from_users` lets you filter by messages sent by one or more users
+            across the desired chats.
+
+        forwards (`bool`, optional):
+            Whether forwarded messages should be handled or not. By default,
+            both forwarded and normal messages are included. If it's ``True``
+            *only* forwards will be handled. If it's ``False`` only messages
+            that are *not* forwards will be handled.
+
         pattern (`str`, `callable`, `Pattern`, optional):
             If set, only messages matching this pattern will be handled.
             You can specify a regex-like string which will be matched
             against the message, a callable function that returns ``True``
             if a message is acceptable, or a compiled regex pattern.
     """
-    def __init__(self, incoming=None, outgoing=None,
-                 chats=None, blacklist_chats=False, pattern=None):
+    def __init__(self, chats=None, *, blacklist_chats=False, func=None,
+                 incoming=None, outgoing=None,
+                 from_users=None, forwards=None, pattern=None):
         if incoming and outgoing:
-            raise ValueError('Can only set either incoming or outgoing')
+            incoming = outgoing = None  # Same as no filter
+        elif incoming is not None and outgoing is None:
+            outgoing = not incoming
+        elif outgoing is not None and incoming is None:
+            incoming = not outgoing
+        elif all(x is not None and not x for x in (incoming, outgoing)):
+            raise ValueError("Don't create an event handler if you "
+                             "don't want neither incoming or outgoing!")
 
-        super().__init__(chats=chats, blacklist_chats=blacklist_chats)
+        super().__init__(chats, blacklist_chats=blacklist_chats, func=func)
         self.incoming = incoming
         self.outgoing = outgoing
+        self.from_users = from_users
+        self.forwards = forwards
         if isinstance(pattern, str):
             self.pattern = re.compile(pattern).match
         elif not pattern or callable(pattern):
@@ -50,21 +65,36 @@ class NewMessage(EventBuilder):
         else:
             raise TypeError('Invalid pattern type given')
 
-    def build(self, update):
+        # Should we short-circuit? E.g. perform no check at all
+        self._no_check = all(x is None for x in (
+            self.chats, self.incoming, self.outgoing, self.pattern,
+            self.from_users, self.forwards, self.from_users, self.func
+        ))
+
+    async def _resolve(self, client):
+        await super()._resolve(client)
+        self.from_users = await _into_id_set(client, self.from_users)
+
+    @classmethod
+    def build(cls, update):
         if isinstance(update,
                       (types.UpdateNewMessage, types.UpdateNewChannelMessage)):
             if not isinstance(update.message, types.Message):
                 return  # We don't care about MessageService's here
-            event = NewMessage.Event(update.message)
+            event = cls.Event(update.message)
         elif isinstance(update, types.UpdateShortMessage):
-            event = NewMessage.Event(types.Message(
+            event = cls.Event(types.Message(
                 out=update.out,
                 mentioned=update.mentioned,
                 media_unread=update.media_unread,
                 silent=update.silent,
                 id=update.id,
-                to_id=types.PeerUser(update.user_id),
-                from_id=self._self_id if update.out else update.user_id,
+                # Note that to_id/from_id complement each other in private
+                # messages, depending on whether the message was outgoing.
+                to_id=types.PeerUser(
+                    update.user_id if update.out else cls.self_id
+                ),
+                from_id=cls.self_id if update.out else update.user_id,
                 message=update.message,
                 date=update.date,
                 fwd_from=update.fwd_from,
@@ -73,7 +103,7 @@ class NewMessage(EventBuilder):
                 entities=update.entities
             ))
         elif isinstance(update, types.UpdateShortChatMessage):
-            event = NewMessage.Event(types.Message(
+            event = cls.Event(types.Message(
                 out=update.out,
                 mentioned=update.mentioned,
                 media_unread=update.media_unread,
@@ -91,19 +121,31 @@ class NewMessage(EventBuilder):
         else:
             return
 
-        event._entities = update._entities
-        return self._message_filter_event(event)
+        # Make messages sent to ourselves outgoing unless they're forwarded.
+        # This makes it consistent with official client's appearance.
+        ori = event.message
+        if isinstance(ori.to_id, types.PeerUser):
+            if ori.from_id == ori.to_id.user_id and not ori.fwd_from:
+                event.message.out = True
 
-    def _message_filter_event(self, event):
-        # Short-circuit if we let pass all events
-        if all(x is None for x in (self.incoming, self.outgoing, self.chats,
-                                   self.pattern)):
+        event._entities = update._entities
+        return event
+
+    def filter(self, event):
+        if self._no_check:
             return event
 
         if self.incoming and event.message.out:
             return
         if self.outgoing and not event.message.out:
             return
+        if self.forwards is not None:
+            if bool(self.forwards) != bool(event.message.fwd_from):
+                return
+
+        if self.from_users is not None:
+            if event.message.from_id not in self.from_users:
+                return
 
         if self.pattern:
             match = self.pattern(event.message.message or '')
@@ -111,32 +153,45 @@ class NewMessage(EventBuilder):
                 return
             event.pattern_match = match
 
-        return self._filter_event(event)
+        return super().filter(event)
 
     class Event(EventCommon):
         """
-        Represents the event of a new message.
+        Represents the event of a new message. This event can be treated
+        to all effects as a `telethon.tl.custom.message.Message`, so please
+        **refer to its documentation** to know what you can do with this event.
 
         Members:
             message (:tl:`Message`):
-                This is the original :tl:`Message` object.
+                This is the only difference with the received
+                `telethon.tl.custom.message.Message`, and will
+                return the `telethon.tl.custom.message.Message` itself,
+                not the text.
 
-            is_private (`bool`):
-                True if the message was sent as a private message.
+                See `telethon.tl.custom.message.Message` for the rest of
+                available members and methods.
 
-            is_group (`bool`):
-                True if the message was sent on a group or megagroup.
+            pattern_match (`obj`):
+                The resulting object from calling the passed ``pattern`` function.
+                Here's an example using a string (defaults to regex match):
 
-            is_channel (`bool`):
-                True if the message was sent on a megagroup or channel.
-
-            is_reply (`str`):
-                Whether the message is a reply to some other or not.
+                >>> from telethon import TelegramClient, events
+                >>> client = TelegramClient(...)
+                >>>
+                >>> @client.on(events.NewMessage(pattern=r'hi (\\w+)!'))
+                ... async def handler(event):
+                ...     # In this case, the result is a ``Match`` object
+                ...     # since the ``str`` pattern was converted into
+                ...     # the ``re.compile(pattern).match`` function.
+                ...     print('Welcomed', event.pattern_match.group(1))
+                ...
+                >>>
         """
         def __init__(self, message):
+            self.__dict__['_init'] = False
             if not message.out and isinstance(message.to_id, types.PeerUser):
                 # Incoming message (e.g. from a bot) has to_id=us, and
-                # from_id=bot (the actual "chat" from an user's perspective).
+                # from_id=bot (the actual "chat" from a user's perspective).
                 chat_peer = types.PeerUser(message.from_id)
             else:
                 chat_peer = message.to_id
@@ -144,273 +199,22 @@ class NewMessage(EventBuilder):
             super().__init__(chat_peer=chat_peer,
                              msg_id=message.id, broadcast=bool(message.post))
 
+            self.pattern_match = None
             self.message = message
-            self._text = None
 
-            self._input_sender = None
-            self._sender = None
+        def _set_client(self, client):
+            super()._set_client(client)
+            self.message._finish_init(client, self._entities, None)
+            self.__dict__['_init'] = True  # No new attributes can be set
 
-            self.is_reply = bool(message.reply_to_msg_id)
-            self._reply_message = None
+        def __getattr__(self, item):
+            if item in self.__dict__:
+                return self.__dict__[item]
+            else:
+                return getattr(self.message, item)
 
-        def respond(self, *args, **kwargs):
-            """
-            Responds to the message (not as a reply). This is a shorthand for
-            ``client.send_message(event.chat, ...)``.
-            """
-            return self._client.send_message(self.input_chat, *args, **kwargs)
-
-        def reply(self, *args, **kwargs):
-            """
-            Replies to the message (as a reply). This is a shorthand for
-            ``client.send_message(event.chat, ..., reply_to=event.message.id)``.
-            """
-            kwargs['reply_to'] = self.message.id
-            return self._client.send_message(self.input_chat, *args, **kwargs)
-
-        def forward_to(self, *args, **kwargs):
-            """
-            Forwards the message. This is a shorthand for
-            ``client.forward_messages(entity, event.message, event.chat)``.
-            """
-            kwargs['messages'] = self.message.id
-            kwargs['from_peer'] = self.input_chat
-            return self._client.forward_messages(*args, **kwargs)
-
-        def edit(self, *args, **kwargs):
-            """
-            Edits the message iff it's outgoing. This is a shorthand for
-            ``client.edit_message(event.chat, event.message, ...)``.
-
-            Returns ``None`` if the message was incoming,
-            or the edited message otherwise.
-            """
-            if self.message.fwd_from:
-                return None
-            if not self.message.out:
-                if not isinstance(self.message.to_id, types.PeerUser):
-                    return None
-                me = self._client.get_me(input_peer=True)
-                if self.message.to_id.user_id != me.user_id:
-                    return None
-
-            return self._client.edit_message(self.input_chat,
-                                             self.message,
-                                             *args, **kwargs)
-
-        def delete(self, *args, **kwargs):
-            """
-            Deletes the message. You're responsible for checking whether you
-            have the permission to do so, or to except the error otherwise.
-            This is a shorthand for
-            ``client.delete_messages(event.chat, event.message, ...)``.
-            """
-            return self._client.delete_messages(self.input_chat,
-                                                [self.message],
-                                                *args, **kwargs)
-
-        @property
-        def input_sender(self):
-            """
-            This (:tl:`InputPeer`) is the input version of the user who
-            sent the message. Similarly to ``input_chat``, this doesn't have
-            things like username or similar, but still useful in some cases.
-
-            Note that this might not be available if the library can't
-            find the input chat, or if the message a broadcast on a channel.
-            """
-            if self._input_sender is None:
-                if self.is_channel and not self.is_group:
-                    return None
-
-                try:
-                    self._input_sender = self._client.get_input_entity(
-                        self.message.from_id
-                    )
-                except (ValueError, TypeError):
-                    # We can rely on self.input_chat for this
-                    self._sender, self._input_sender = self._get_entity(
-                        self.message.id,
-                        self.message.from_id,
-                        chat=self.input_chat
-                    )
-
-            return self._input_sender
-
-        @property
-        def sender(self):
-            """
-            This (:tl:`User`) may make an API call the first time to get
-            the most up to date version of the sender (mostly when the event
-            doesn't belong to a channel), so keep that in mind.
-
-            ``input_sender`` needs to be available (often the case).
-            """
-            if not self.input_sender:
-                return None
-
-            if self._sender is None:
-                self._sender = \
-                    self._entities.get(utils.get_peer_id(self._input_sender))
-
-            if self._sender is None:
-                self._sender = self._client.get_entity(self._input_sender)
-
-            return self._sender
-
-        @property
-        def sender_id(self):
-            """
-            Returns the marked sender integer ID, if present.
-            """
-            return self.message.from_id
-
-        @property
-        def text(self):
-            """
-            The message text, markdown-formatted.
-            """
-            if self._text is None:
-                if not self.message.entities:
-                    return self.message.message
-                self._text = markdown.unparse(self.message.message,
-                                              self.message.entities or [])
-            return self._text
-
-        @property
-        def raw_text(self):
-            """
-            The raw message text, ignoring any formatting.
-            """
-            return self.message.message
-
-        @property
-        def reply_message(self):
-            """
-            This optional :tl:`Message` will make an API call the first
-            time to get the full :tl:`Message` object that one was replying to,
-            so use with care as there is no caching besides local caching yet.
-            """
-            if not self.message.reply_to_msg_id:
-                return None
-
-            if self._reply_message is None:
-                if isinstance(self.input_chat, types.InputPeerChannel):
-                    r = self._client(functions.channels.GetMessagesRequest(
-                        self.input_chat, [self.message.reply_to_msg_id]
-                    ))
-                else:
-                    r = self._client(functions.messages.GetMessagesRequest(
-                        [self.message.reply_to_msg_id]
-                    ))
-                if not isinstance(r, types.messages.MessagesNotModified):
-                    self._reply_message = r.messages[0]
-
-            return self._reply_message
-
-        @property
-        def forward(self):
-            """
-            The unmodified :tl:`MessageFwdHeader`, if present..
-            """
-            return self.message.fwd_from
-
-        @property
-        def media(self):
-            """
-            The unmodified :tl:`MessageMedia`, if present.
-            """
-            return self.message.media
-
-        @property
-        def photo(self):
-            """
-            If the message media is a photo,
-            this returns the :tl:`Photo` object.
-            """
-            if isinstance(self.message.media, types.MessageMediaPhoto):
-                photo = self.message.media.photo
-                if isinstance(photo, types.Photo):
-                    return photo
-
-        @property
-        def document(self):
-            """
-            If the message media is a document,
-            this returns the :tl:`Document` object.
-            """
-            if isinstance(self.message.media, types.MessageMediaDocument):
-                doc = self.message.media.document
-                if isinstance(doc, types.Document):
-                    return doc
-
-        def _document_by_attribute(self, kind, condition=None):
-            """
-            Helper method to return the document only if it has an attribute
-            that's an instance of the given kind, and passes the condition.
-            """
-            doc = self.document
-            if doc:
-                for attr in doc.attributes:
-                    if isinstance(attr, kind):
-                        if not condition or condition(doc):
-                            return doc
-
-        @property
-        def audio(self):
-            """
-            If the message media is a document with an Audio attribute,
-            this returns the :tl:`Document` object.
-            """
-            return self._document_by_attribute(types.DocumentAttributeAudio,
-                                               lambda attr: not attr.voice)
-
-        @property
-        def voice(self):
-            """
-            If the message media is a document with a Voice attribute,
-            this returns the :tl:`Document` object.
-            """
-            return self._document_by_attribute(types.DocumentAttributeAudio,
-                                               lambda attr: attr.voice)
-
-        @property
-        def video(self):
-            """
-            If the message media is a document with a Video attribute,
-            this returns the :tl:`Document` object.
-            """
-            return self._document_by_attribute(types.DocumentAttributeVideo)
-
-        @property
-        def video_note(self):
-            """
-            If the message media is a document with a Video attribute,
-            this returns the :tl:`Document` object.
-            """
-            return self._document_by_attribute(types.DocumentAttributeVideo,
-                                               lambda attr: attr.round_message)
-
-        @property
-        def gif(self):
-            """
-            If the message media is a document with an Animated attribute,
-            this returns the :tl:`Document` object.
-            """
-            return self._document_by_attribute(types.DocumentAttributeAnimated)
-
-        @property
-        def sticker(self):
-            """
-            If the message media is a document with a Sticker attribute,
-            this returns the :tl:`Document` object.
-            """
-            return self._document_by_attribute(types.DocumentAttributeSticker)
-
-        @property
-        def out(self):
-            """
-            Whether the message is outgoing (i.e. you sent it from
-            another session) or incoming (i.e. someone else sent it).
-            """
-            return self.message.out
+        def __setattr__(self, name, value):
+            if not self.__dict__['_init'] or name in self.__dict__:
+                self.__dict__[name] = value
+            else:
+                setattr(self.message, name, value)

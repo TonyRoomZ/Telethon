@@ -5,6 +5,7 @@ from ..functions.messages import SaveDraftRequest
 from ..types import UpdateDraftMessage, DraftMessage
 from ...errors import RPCError
 from ...extensions import markdown
+from ...utils import get_peer_id, get_input_peer
 
 
 class Draft:
@@ -23,10 +24,13 @@ class Draft:
         reply_to_msg_id (`int`):
             The message ID that the draft will reply to.
     """
-    def __init__(self, client, peer, draft):
+    def __init__(self, client, peer, draft, entity):
         self._client = client
         self._peer = peer
-        if not draft:
+        self._entity = entity
+        self._input_entity = get_input_peer(entity) if entity else None
+
+        if not draft or not isinstance(draft, DraftMessage):
             draft = DraftMessage('', None, None, None, None)
 
         self._text = markdown.unparse(draft.message, draft.entities)
@@ -36,28 +40,57 @@ class Draft:
         self.reply_to_msg_id = draft.reply_to_msg_id
 
     @classmethod
-    def _from_update(cls, client, update):
-        if not isinstance(update, UpdateDraftMessage):
-            raise TypeError(
-                'You can only create a new `Draft` from a corresponding '
-                '`UpdateDraftMessage` object.'
-            )
+    def _from_dialog(cls, client, dialog):
+        return cls(client=client, peer=dialog.dialog.peer,
+                   draft=dialog.dialog.draft, entity=dialog.entity)
 
-        return cls(client=client, peer=update.peer, draft=update.draft)
+    @classmethod
+    def _from_update(cls, client, update, entities=None):
+        assert isinstance(update, UpdateDraftMessage)
+        return cls(client=client, peer=update.peer, draft=update.draft,
+                   entity=(entities or {}).get(get_peer_id(update.peer)))
 
     @property
     def entity(self):
         """
         The entity that belongs to this dialog (user, chat or channel).
         """
-        return self._client.get_entity(self._peer)
+        return self._entity
 
     @property
     def input_entity(self):
         """
         Input version of the entity.
         """
-        return self._client.get_input_entity(self._peer)
+        if not self._input_entity:
+            try:
+                self._input_entity =\
+                    self._client.session.get_input_entity(self._peer)
+            except ValueError:
+                pass
+
+        return self._input_entity
+
+    async def get_entity(self):
+        """
+        Returns `entity` but will make an API call if necessary.
+        """
+        if not self.entity and await self.get_input_entity():
+            try:
+                self._entity =\
+                    await self._client.get_entity(self._input_entity)
+            except ValueError:
+                pass
+
+        return self._entity
+
+    async def get_input_entity(self):
+        """
+        Returns `input_entity` but will make an API call if necessary.
+        """
+        # We don't actually have an API call we can make yet
+        # to get more info, but keep this method for consistency.
+        return self.input_entity
 
     @property
     def text(self):
@@ -82,8 +115,9 @@ class Draft:
         """
         return not self._text
 
-    def set_message(self, text=None, reply_to=0, parse_mode='md',
-                    link_preview=None):
+    async def set_message(
+            self, text=None, reply_to=0, parse_mode=(),
+            link_preview=None):
         """
         Changes the draft message on the Telegram servers. The changes are
         reflected in this object.
@@ -109,8 +143,10 @@ class Draft:
         if link_preview is None:
             link_preview = self.link_preview
 
-        raw_text, entities = self._client._parse_message_text(text, parse_mode)
-        result = self._client(SaveDraftRequest(
+        raw_text, entities =\
+            await self._client._parse_message_text(text, parse_mode)
+
+        result = await self._client(SaveDraftRequest(
             peer=self._peer,
             message=raw_text,
             no_webpage=not link_preview,
@@ -127,22 +163,22 @@ class Draft:
 
         return result
 
-    def send(self, clear=True, parse_mode='md'):
+    async def send(self, clear=True, parse_mode=()):
         """
         Sends the contents of this draft to the dialog. This is just a
         wrapper around ``send_message(dialog.input_entity, *args, **kwargs)``.
         """
-        self._client.send_message(self._peer, self.text,
-                                  reply_to=self.reply_to_msg_id,
-                                  link_preview=self.link_preview,
-                                  parse_mode=parse_mode,
-                                  clear_draft=clear)
+        await self._client.send_message(
+            self._peer, self.text, reply_to=self.reply_to_msg_id,
+            link_preview=self.link_preview, parse_mode=parse_mode,
+            clear_draft=clear
+        )
 
-    def delete(self):
+    async def delete(self):
         """
         Deletes this draft, and returns ``True`` on success.
         """
-        return self.set_message(text='')
+        return await self.set_message(text='')
 
     def to_dict(self):
         try:

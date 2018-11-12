@@ -15,8 +15,10 @@ or use the menu on the left. Remember to read the :ref:`changelog`
 when you upgrade!
 
 .. important::
-   If you're new here, you want to read :ref:`getting-started`. If you're
-   looking for the method reference, you should check :ref:`telethon-package`.
+
+    * Are you new here? Jump straight into :ref:`getting-started`!
+    * Looking for available friendly methods? See :ref:`telethon-client`.
+    * Used Telethon before v1.0? See :ref:`compatibility-and-convenience`.
 
 
 What is this?
@@ -40,6 +42,7 @@ heavy job for you, so you can focus on developing an application.
    extra/basic/telegram-client
    extra/basic/entities
    extra/basic/working-with-updates
+   extra/basic/compatibility-and-convenience
 
 
 .. _Advanced-usage:
@@ -51,6 +54,8 @@ heavy job for you, so you can focus on developing an application.
    extra/advanced-usage/accessing-the-full-api
    extra/advanced-usage/sessions
    extra/advanced-usage/update-modes
+   extra/advanced-usage/mastering-telethon
+   extra/advanced-usage/mastering-asyncio
 
 
 .. _Examples:
@@ -59,6 +64,7 @@ heavy job for you, so you can focus on developing an application.
    :maxdepth: 2
    :caption: Examples
 
+   extra/examples/telegram-client
    extra/examples/working-with-messages
    extra/examples/chats-and-channels
    extra/examples/users

@@ -7,21 +7,22 @@ from ..tl import types
 @name_inner_event
 class UserUpdate(EventBuilder):
     """
-    Represents an user update (gone online, offline, joined Telegram).
+    Represents a user update (gone online, offline, joined Telegram).
     """
-    def build(self, update):
+    @classmethod
+    def build(cls, update):
         if isinstance(update, types.UpdateUserStatus):
-            event = UserUpdate.Event(update.user_id,
-                                     status=update.status)
+            event = cls.Event(update.user_id,
+                              status=update.status)
         else:
             return
 
         event._entities = update._entities
-        return self._filter_event(event)
+        return event
 
     class Event(EventCommon):
         """
-        Represents the event of an user status update (last seen, joined).
+        Represents the event of a user status update (last seen, joined).
 
         Members:
             online (`bool`, optional):
@@ -82,7 +83,7 @@ class UserUpdate(EventBuilder):
             contact (`bool`):
                 ``True`` if what's being uploaded (selected) is a contact.
         """
-        def __init__(self, user_id, status=None, typing=None):
+        def __init__(self, user_id, *, status=None, typing=None):
             super().__init__(types.PeerUser(user_id))
 
             self.online = None if status is None else \
@@ -95,7 +96,8 @@ class UserUpdate(EventBuilder):
                 isinstance(status, types.UserStatusOnline) else None
 
             if self.last_seen:
-                diff = datetime.datetime.now() - self.last_seen
+                now = datetime.datetime.now(tz=datetime.timezone.utc)
+                diff = now - self.last_seen
                 if diff < datetime.timedelta(days=30):
                     self.within_months = True
                     if diff < datetime.timedelta(days=7):
@@ -149,15 +151,23 @@ class UserUpdate(EventBuilder):
 
         @property
         def user(self):
-            """Alias around the chat (conversation)."""
+            """Alias for `chat` (conversation)."""
             return self.chat
+
+        async def get_user(self):
+            """Alias for `get_chat` (conversation)."""
+            return await self.get_chat()
 
         @property
         def input_user(self):
-            """Alias around the input chat."""
+            """Alias for `input_chat`."""
             return self.input_chat
+
+        async def get_input_user(self):
+            """Alias for `get_input_chat`."""
+            return await self.get_input_chat()
 
         @property
         def user_id(self):
-            """Alias around `chat_id`."""
+            """Alias for `chat_id`."""
             return self.chat_id

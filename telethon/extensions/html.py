@@ -9,8 +9,8 @@ from html.parser import HTMLParser
 from ..tl.types import (
     MessageEntityBold, MessageEntityItalic, MessageEntityCode,
     MessageEntityPre, MessageEntityEmail, MessageEntityUrl,
-    MessageEntityTextUrl
-)
+    MessageEntityTextUrl, MessageEntityMentionName
+    )
 
 
 # Helpers from markdown.py
@@ -121,6 +121,9 @@ def parse(html):
     :param message: the message with HTML to be parsed.
     :return: a tuple consisting of (clean message, [message entities]).
     """
+    if not html:
+        return html, []
+
     parser = HTMLToTelegramParser()
     parser.feed(_add_surrogate(html))
     return _del_surrogate(parser.text), parser.entities
@@ -135,7 +138,7 @@ def unparse(text, entities):
     :param entities: the MessageEntity's applied to the text.
     :return: a HTML representation of the combination of both inputs.
     """
-    if not entities:
+    if not text or not entities:
         return text
 
     text = _add_surrogate(text)
@@ -175,6 +178,9 @@ def unparse(text, entities):
         elif entity_type == MessageEntityTextUrl:
             html.append('<a href="{}">{}</a>'
                         .format(escape(entity.url), entity_text))
+        elif entity_type == MessageEntityMentionName:
+            html.append('<a href="tg://user?id={}">{}</a>'
+                        .format(entity.user_id, entity_text))
         else:
             skip_entity = True
         last_offset = entity.offset + (0 if skip_entity else entity.length)

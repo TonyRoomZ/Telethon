@@ -8,23 +8,24 @@ class ChatAction(EventBuilder):
     """
     Represents an action in a chat (such as user joined, left, or new pin).
     """
-    def build(self, update):
+    @classmethod
+    def build(cls, update):
         if isinstance(update, types.UpdateChannelPinnedMessage) and update.id == 0:
             # Telegram does not always send
             # UpdateChannelPinnedMessage for new pins
             # but always for unpin, with update.id = 0
-            event = ChatAction.Event(types.PeerChannel(update.channel_id),
-                                     unpin=True)
+            event = cls.Event(types.PeerChannel(update.channel_id),
+                              unpin=True)
 
         elif isinstance(update, types.UpdateChatParticipantAdd):
-            event = ChatAction.Event(types.PeerChat(update.chat_id),
-                                     added_by=update.inviter_id or True,
-                                     users=update.user_id)
+            event = cls.Event(types.PeerChat(update.chat_id),
+                              added_by=update.inviter_id or True,
+                              users=update.user_id)
 
         elif isinstance(update, types.UpdateChatParticipantDelete):
-            event = ChatAction.Event(types.PeerChat(update.chat_id),
-                                     kicked_by=True,
-                                     users=update.user_id)
+            event = cls.Event(types.PeerChat(update.chat_id),
+                              kicked_by=True,
+                              users=update.user_id)
 
         elif (isinstance(update, (
                 types.UpdateNewMessage, types.UpdateNewChannelMessage))
@@ -32,51 +33,53 @@ class ChatAction(EventBuilder):
             msg = update.message
             action = update.message.action
             if isinstance(action, types.MessageActionChatJoinedByLink):
-                event = ChatAction.Event(msg,
-                                         added_by=True,
-                                         users=msg.from_id)
+                event = cls.Event(msg,
+                                  added_by=True,
+                                  users=msg.from_id)
             elif isinstance(action, types.MessageActionChatAddUser):
-                event = ChatAction.Event(msg,
-                                         added_by=msg.from_id or True,
-                                         users=action.users)
+                # If a user adds itself, it means they joined
+                added_by = ([msg.from_id] == action.users) or msg.from_id
+                event = cls.Event(msg,
+                                  added_by=added_by,
+                                  users=action.users)
             elif isinstance(action, types.MessageActionChatDeleteUser):
-                event = ChatAction.Event(msg,
-                                         kicked_by=msg.from_id or True,
-                                         users=action.user_id)
+                event = cls.Event(msg,
+                                  kicked_by=msg.from_id or True,
+                                  users=action.user_id)
             elif isinstance(action, types.MessageActionChatCreate):
-                event = ChatAction.Event(msg,
-                                         users=action.users,
-                                         created=True,
-                                         new_title=action.title)
+                event = cls.Event(msg,
+                                  users=action.users,
+                                  created=True,
+                                  new_title=action.title)
             elif isinstance(action, types.MessageActionChannelCreate):
-                event = ChatAction.Event(msg,
-                                         created=True,
-                                         users=msg.from_id,
-                                         new_title=action.title)
+                event = cls.Event(msg,
+                                  created=True,
+                                  users=msg.from_id,
+                                  new_title=action.title)
             elif isinstance(action, types.MessageActionChatEditTitle):
-                event = ChatAction.Event(msg,
-                                         users=msg.from_id,
-                                         new_title=action.title)
+                event = cls.Event(msg,
+                                  users=msg.from_id,
+                                  new_title=action.title)
             elif isinstance(action, types.MessageActionChatEditPhoto):
-                event = ChatAction.Event(msg,
-                                         users=msg.from_id,
-                                         new_photo=action.photo)
+                event = cls.Event(msg,
+                                  users=msg.from_id,
+                                  new_photo=action.photo)
             elif isinstance(action, types.MessageActionChatDeletePhoto):
-                event = ChatAction.Event(msg,
-                                         users=msg.from_id,
-                                         new_photo=True)
+                event = cls.Event(msg,
+                                  users=msg.from_id,
+                                  new_photo=True)
             elif isinstance(action, types.MessageActionPinMessage):
                 # Telegram always sends this service message for new pins
-                event = ChatAction.Event(msg,
-                                         users=msg.from_id,
-                                         new_pin=msg.reply_to_msg_id)
+                event = cls.Event(msg,
+                                  users=msg.from_id,
+                                  new_pin=msg.reply_to_msg_id)
             else:
                 return
         else:
             return
 
         event._entities = update._entities
-        return self._filter_event(event)
+        return event
 
     class Event(EventCommon):
         """
@@ -95,7 +98,6 @@ class ChatAction(EventBuilder):
             photo (:tl:`Photo`, optional):
                 The new photo (or ``None`` if it was removed).
 
-
             user_added (`bool`):
                 ``True`` if the user was added by some other.
 
@@ -111,7 +113,7 @@ class ChatAction(EventBuilder):
             created (`bool`, optional):
                 ``True`` if this chat was just created.
 
-            new_title (`bool`, optional):
+            new_title (`str`, optional):
                 The new title string for the chat, if applicable.
 
             unpin (`bool`):
@@ -137,8 +139,8 @@ class ChatAction(EventBuilder):
 
             self._added_by = None
             self._kicked_by = None
-            self.user_added, self.user_joined, self.user_left,\
-                self.user_kicked, self.unpin = (False, False, False, False, False)
+            self.user_added = self.user_joined = self.user_left = \
+                self.user_kicked = self.unpin = False
 
             if added_by is True:
                 self.user_joined = True
@@ -159,51 +161,64 @@ class ChatAction(EventBuilder):
             self.new_title = new_title
             self.unpin = unpin
 
-        def respond(self, *args, **kwargs):
-            """
-            Responds to the chat action message (not as a reply).
-            Shorthand for ``client.send_message(event.chat, ...)``.
-            """
-            return self._client.send_message(self.input_chat, *args, **kwargs)
+        def _set_client(self, client):
+            super()._set_client(client)
+            if self.action_message:
+                self.action_message._finish_init(client, self._entities, None)
 
-        def reply(self, *args, **kwargs):
+        async def respond(self, *args, **kwargs):
+            """
+            Responds to the chat action message (not as a reply). Shorthand for
+            `telethon.client.messages.MessageMethods.send_message` with
+            ``entity`` already set.
+            """
+            return await self._client.send_message(
+                await self.get_input_chat(), *args, **kwargs)
+
+        async def reply(self, *args, **kwargs):
             """
             Replies to the chat action message (as a reply). Shorthand for
-            ``client.send_message(event.chat, ..., reply_to=event.message.id)``.
+            `telethon.client.messages.MessageMethods.send_message` with
+            both ``entity`` and ``reply_to`` already set.
 
-            Has the same effect as ``.respond()`` if there is no message.
+            Has the same effect as `respond` if there is no message.
             """
             if not self.action_message:
-                return self.respond(*args, **kwargs)
+                return await self.respond(*args, **kwargs)
 
             kwargs['reply_to'] = self.action_message.id
-            return self._client.send_message(self.input_chat, *args, **kwargs)
+            return await self._client.send_message(
+                await self.get_input_chat(), *args, **kwargs)
 
-        def delete(self, *args, **kwargs):
+        async def delete(self, *args, **kwargs):
             """
             Deletes the chat action message. You're responsible for checking
             whether you have the permission to do so, or to except the error
-            otherwise. This is a shorthand for
-            ``client.delete_messages(event.chat, event.message, ...)``.
+            otherwise. Shorthand for
+            `telethon.client.messages.MessageMethods.delete_messages` with
+            ``entity`` and ``message_ids`` already set.
 
             Does nothing if no message action triggered this event.
             """
-            if self.action_message:
-                return self._client.delete_messages(self.input_chat,
-                                                    [self.action_message],
-                                                    *args, **kwargs)
+            if not self.action_message:
+                return
 
-        @property
-        def pinned_message(self):
+            return await self._client.delete_messages(
+                await self.get_input_chat(), [self.action_message],
+                *args, **kwargs
+            )
+
+        async def get_pinned_message(self):
             """
-            If ``new_pin`` is ``True``, this returns the (:tl:`Message`)
-            object that was pinned.
+            If ``new_pin`` is ``True``, this returns the
+            `telethon.tl.custom.message.Message` object that was pinned.
             """
             if self._pinned_message == 0:
                 return None
 
-            if isinstance(self._pinned_message, int) and self.input_chat:
-                r = self._client(functions.channels.GetMessagesRequest(
+            if isinstance(self._pinned_message, int)\
+                    and await self.get_input_chat():
+                r = await self._client(functions.channels.GetMessagesRequest(
                     self._input_chat, [self._pinned_message]
                 ))
                 try:
@@ -224,11 +239,18 @@ class ChatAction(EventBuilder):
             The user who added ``users``, if applicable (``None`` otherwise).
             """
             if self._added_by and not isinstance(self._added_by, types.User):
-                self._added_by =\
-                    self._entities.get(utils.get_peer_id(self._added_by))
+                aby = self._entities.get(utils.get_peer_id(self._added_by))
+                if aby:
+                    self._added_by = aby
 
-                if not self._added_by:
-                    self._added_by = self._client.get_entity(self._added_by)
+            return self._added_by
+
+        async def get_added_by(self):
+            """
+            Returns `added_by` but will make an API call if necessary.
+            """
+            if not self.added_by and self._added_by:
+                self._added_by = await self._client.get_entity(self._added_by)
 
             return self._added_by
 
@@ -238,11 +260,18 @@ class ChatAction(EventBuilder):
             The user who kicked ``users``, if applicable (``None`` otherwise).
             """
             if self._kicked_by and not isinstance(self._kicked_by, types.User):
-                self._kicked_by =\
-                    self._entities.get(utils.get_peer_id(self._kicked_by))
+                kby = self._entities.get(utils.get_peer_id(self._kicked_by))
+                if kby:
+                    self._kicked_by = kby
 
-                if not self._kicked_by:
-                    self._kicked_by = self._client.get_entity(self._kicked_by)
+            return self._kicked_by
+
+        async def get_kicked_by(self):
+            """
+            Returns `kicked_by` but will make an API call if necessary.
+            """
+            if not self.kicked_by and self._kicked_by:
+                self._kicked_by = await self._client.get_entity(self._kicked_by)
 
             return self._kicked_by
 
@@ -257,12 +286,25 @@ class ChatAction(EventBuilder):
             if self.users:
                 return self._users[0]
 
-        @property
+        async def get_user(self):
+            """
+            Returns `user` but will make an API call if necessary.
+            """
+            if self.users or await self.get_users():
+                return self._users[0]
+
         def input_user(self):
             """
             Input version of the ``self.user`` property.
             """
             if self.input_users:
+                return self._input_users[0]
+
+        async def get_input_user(self):
+            """
+            Returns `input_user` but will make an API call if necessary.
+            """
+            if self.input_users or await self.get_input_users():
                 return self._input_users[0]
 
         @property
@@ -285,6 +327,22 @@ class ChatAction(EventBuilder):
                 return []
 
             if self._users is None:
+                self._users = [
+                    self._entities[utils.get_peer_id(peer)]
+                    for peer in self._user_peers
+                    if utils.get_peer_id(peer) in self._entities
+                ]
+
+            return self._users
+
+        async def get_users(self):
+            """
+            Returns `users` but will make an API call if necessary.
+            """
+            if not self._user_peers:
+                return []
+
+            if self._users is None or len(self._users) != len(self._user_peers):
                 have, missing = [], []
                 for peer in self._user_peers:
                     user = self._entities.get(utils.get_peer_id(peer))
@@ -294,7 +352,7 @@ class ChatAction(EventBuilder):
                         missing.append(peer)
 
                 try:
-                    missing = self._client.get_entity(missing)
+                    missing = await self._client.get_entity(missing)
                 except (TypeError, ValueError):
                     missing = []
 
@@ -311,12 +369,19 @@ class ChatAction(EventBuilder):
                 self._input_users = []
                 for peer in self._user_peers:
                     try:
-                        self._input_users.append(self._client.get_input_entity(
-                            peer
-                        ))
-                    except (TypeError, ValueError):
+                        self._input_users.append(
+                            self._client.session.get_input_entity(peer)
+                        )
+                    except ValueError:
                         pass
-            return self._input_users
+            return self._input_users or []
+
+        async def get_input_users(self):
+            """
+            Returns `input_users` but will make an API call if necessary.
+            """
+            # TODO Maybe we could re-fetch the message
+            return self.input_users
 
         @property
         def user_ids(self):

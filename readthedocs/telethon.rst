@@ -5,21 +5,18 @@ telethon package
 ================
 
 
-telethon\.telegram\_client module
----------------------------------
+telethon\.client module
+-----------------------
 
-.. automodule:: telethon.telegram_client
+.. toctree::
+
+    telethon.client
+
+.. automodule:: telethon.client
     :members:
     :undoc-members:
     :show-inheritance:
 
-telethon\.telegram\_bare\_client module
----------------------------------------
-
-.. automodule:: telethon.telegram_bare_client
-    :members:
-    :undoc-members:
-    :show-inheritance:
 
 telethon\.utils module
 ----------------------
@@ -29,6 +26,7 @@ telethon\.utils module
     :undoc-members:
     :show-inheritance:
 
+
 telethon\.helpers module
 ------------------------
 
@@ -36,6 +34,7 @@ telethon\.helpers module
     :members:
     :undoc-members:
     :show-inheritance:
+
 
 telethon\.events package
 ------------------------
@@ -45,14 +44,6 @@ telethon\.events package
     telethon.events
 
 
-telethon\.update\_state module
-------------------------------
-
-.. automodule:: telethon.update_state
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
 telethon\.sessions module
 -------------------------
 
@@ -60,13 +51,6 @@ telethon\.sessions module
     :members:
     :undoc-members:
     :show-inheritance:
-
-telethon\.cryto package
-------------------------
-
-.. toctree::
-
-    telethon.crypto
 
 telethon\.errors package
 ------------------------
@@ -95,7 +79,6 @@ telethon\.tl package
 .. toctree::
 
     telethon.tl
-
 
 
 Module contents

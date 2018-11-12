@@ -1,36 +1,46 @@
 #!/usr/bin/env python3
 # A simple script to print all updates received
+import os
+import sys
+import time
 
-from os import environ
-
-# environ is used to get API information from environment variables
-# You could also use a config file, pass them as arguments,
-# or even hardcode them (not recommended)
 from telethon import TelegramClient
 
 
-def main():
-    session_name = environ.get('TG_SESSION', 'session')
-    client = TelegramClient(session_name,
-                            int(environ['TG_API_ID']),
-                            environ['TG_API_HASH'],
-                            proxy=None,
-                            update_workers=4,
-                            spawn_read_thread=False)
-
-    if 'TG_PHONE' in environ:
-        client.start(phone=environ['TG_PHONE'])
-    else:
-        client.start()
-
-    client.add_update_handler(update_handler)
-    print('(Press Ctrl+C to stop this)')
-    client.idle()
+def get_env(name, message, cast=str):
+    if name in os.environ:
+        return os.environ[name]
+    while True:
+        value = input(message)
+        try:
+            return cast(value)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            time.sleep(1)
 
 
-def update_handler(update):
+client = TelegramClient(
+    os.environ.get('TG_SESSION', 'printer'),
+    get_env('TG_API_ID', 'Enter your API ID: ', int),
+    get_env('TG_API_HASH', 'Enter your API hash: '),
+    proxy=None
+)
+
+
+async def update_handler(update):
     print(update)
 
 
-if __name__ == '__main__':
-    main()
+client.add_event_handler(update_handler)
+
+'''You could also have used the @client.on(...) syntax:
+from telethon import events
+
+@client.on(events.Raw)
+async def update_handler(update):
+    print(update)
+'''
+
+with client.start():
+    print('(Press Ctrl+C to stop this)')
+    client.run_until_disconnected()

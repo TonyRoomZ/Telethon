@@ -1,16 +1,13 @@
 import abc
-import datetime
-import itertools
-import re
+import asyncio
 import warnings
 
 from .. import utils
-from ..errors import RPCError
-from ..extensions import markdown
-from ..tl import TLObject, types, functions
+from ..tl import TLObject, types
+from ..tl.custom.chatgetter import ChatGetter
 
 
-def _into_id_set(client, chats):
+async def _into_id_set(client, chats):
     """Helper util to turn the input chat or chats into a set of IDs."""
     if chats is None:
         return None
@@ -33,9 +30,9 @@ def _into_id_set(client, chats):
             # 0x2d45687 == crc32(b'Peer')
             result.add(utils.get_peer_id(chat))
         else:
-            chat = client.get_input_entity(chat)
+            chat = await client.get_input_entity(chat)
             if isinstance(chat, types.InputPeerSelf):
-                chat = client.get_me(input_peer=True)
+                chat = await client.get_me(input_peer=True)
             result.add(utils.get_peer_id(chat))
 
     return result
@@ -47,45 +44,91 @@ class EventBuilder(abc.ABC):
 
     Args:
         chats (`entity`, optional):
-            May be one or more entities (username/peer/etc.). By default,
-            only matching chats will be handled.
+            May be one or more entities (username/peer/etc.), preferably IDs.
+            By default, only matching chats will be handled.
 
         blacklist_chats (`bool`, optional):
             Whether to treat the chats as a blacklist instead of
             as a whitelist (default). This means that every chat
             will be handled *except* those specified in ``chats``
             which will be ignored if ``blacklist_chats=True``.
+
+        func (`callable`, optional):
+            A callable function that should accept the event as input
+            parameter, and return a value indicating whether the event
+            should be dispatched or not (any truthy value will do, it
+            does not need to be a `bool`). It works like a custom filter:
+
+            .. code-block:: python
+
+                @client.on(events.NewMessage(func=lambda e: e.is_private))
+                async def handler(event):
+                    pass  # code here
     """
-    def __init__(self, chats=None, blacklist_chats=False):
+    self_id = None
+
+    def __init__(self, chats=None, *, blacklist_chats=False, func=None):
         self.chats = chats
         self.blacklist_chats = blacklist_chats
-        self._self_id = None
+        self.resolved = False
+        self.func = func
+        self._resolve_lock = None
 
+    @classmethod
     @abc.abstractmethod
-    def build(self, update):
+    def build(cls, update):
         """Builds an event for the given update if possible, or returns None"""
 
-    def resolve(self, client):
+    async def resolve(self, client):
         """Helper method to allow event builders to be resolved before usage"""
-        self.chats = _into_id_set(client, self.chats)
-        self._self_id = client.get_me(input_peer=True).user_id
+        if self.resolved:
+            return
 
-    def _filter_event(self, event):
+        if not self._resolve_lock:
+            self._resolve_lock = asyncio.Lock(loop=client.loop)
+
+        async with self._resolve_lock:
+            if not self.resolved:
+                await self._resolve(client)
+                self.resolved = True
+
+    async def _resolve(self, client):
+        self.chats = await _into_id_set(client, self.chats)
+        if not EventBuilder.self_id:
+            EventBuilder.self_id = await client.get_peer_id('me')
+
+    def filter(self, event):
         """
         If the ID of ``event._chat_peer`` isn't in the chats set (or it is
         but the set is a blacklist) returns ``None``, otherwise the event.
+
+        The events must have been resolved before this can be called.
         """
+        if not self.resolved:
+            return None
+
         if self.chats is not None:
             inside = utils.get_peer_id(event._chat_peer) in self.chats
             if inside == self.blacklist_chats:
                 # If this chat matches but it's a blacklist ignore.
                 # If it doesn't match but it's a whitelist ignore.
                 return None
-        return event
+
+        if not self.func or self.func(event):
+            return event
 
 
-class EventCommon(abc.ABC):
-    """Intermediate class with common things to all events"""
+class EventCommon(ChatGetter, abc.ABC):
+    """
+    Intermediate class with common things to all events.
+
+    Remember that this class implements `ChatGetter
+    <telethon.tl.custom.chatgetter.ChatGetter>` which
+    means you have access to all chat properties and methods.
+
+    In addition, you can access the `original_update`
+    field which contains the original :tl:`Update`.
+    """
     _event_name = 'Event'
 
     def __init__(self, chat_peer=None, msg_id=None, broadcast=False):
@@ -95,106 +138,34 @@ class EventCommon(abc.ABC):
         self._message_id = msg_id
         self._input_chat = None
         self._chat = None
+        self._broadcast = broadcast
+        self.original_update = None
 
-        self.pattern_match = None
-
-        self.is_private = isinstance(chat_peer, types.PeerUser)
-        self.is_group = (
-            isinstance(chat_peer, (types.PeerChat, types.PeerChannel))
-            and not broadcast
-        )
-        self.is_channel = isinstance(chat_peer, types.PeerChannel)
-
-    def _get_entity(self, msg_id, entity_id, chat=None):
+    def _set_client(self, client):
         """
-        Helper function to call :tl:`GetMessages` on the give msg_id and
-        return the input entity whose ID is the given entity ID.
-
-        If ``chat`` is present it must be an :tl:`InputPeer`.
-
-        Returns a tuple of ``(entity, input_peer)`` if it was found, or
-        a tuple of ``(None, None)`` if it couldn't be.
+        Setter so subclasses can act accordingly when the client is set.
         """
-        try:
-            if isinstance(chat, types.InputPeerChannel):
-                result = self._client(
-                    functions.channels.GetMessagesRequest(chat, [msg_id])
-                )
-            else:
-                result = self._client(
-                    functions.messages.GetMessagesRequest([msg_id])
-                )
-        except RPCError:
-            return None, None
+        self._client = client
+        self._chat = self._entities.get(self.chat_id)
+        if not self._chat:
+            return
 
-        entity = {
-            utils.get_peer_id(x): x for x in itertools.chain(
-                getattr(result, 'chats', []),
-                getattr(result, 'users', []))
-        }.get(entity_id)
-        if entity:
-            return entity, utils.get_input_peer(entity)
-        else:
-            return None, None
-
-    @property
-    def input_chat(self):
-        """
-        The (:tl:`InputPeer`) (group, megagroup or channel) on which
-        the event occurred. This doesn't have the title or anything,
-        but is useful if you don't need those to avoid further
-        requests.
-
-        Note that this might be ``None`` if the library can't find it.
-        """
-
-        if self._input_chat is None and self._chat_peer is not None:
+        self._input_chat = utils.get_input_peer(self._chat)
+        if not getattr(self._input_chat, 'access_hash', True):
+            # getattr with True to handle the InputPeerSelf() case
             try:
-                self._input_chat = self._client.get_input_entity(
+                self._input_chat = self._client.session.get_input_entity(
                     self._chat_peer
                 )
-            except (ValueError, TypeError):
-                # The library hasn't seen this chat, get the message
-                if not isinstance(self._chat_peer, types.PeerChannel):
-                    # TODO For channels, getDifference? Maybe looking
-                    # in the dialogs (which is already done) is enough.
-                    if self._message_id is not None:
-                        self._chat, self._input_chat = self._get_entity(
-                            self._message_id,
-                            utils.get_peer_id(self._chat_peer)
-                        )
-        return self._input_chat
+            except ValueError:
+                self._input_chat = None
 
     @property
     def client(self):
+        """
+        The `telethon.TelegramClient` that created this event.
+        """
         return self._client
-
-    @property
-    def chat(self):
-        """
-        The (:tl:`User` | :tl:`Chat` | :tl:`Channel`, optional) on which
-        the event occurred. This property may make an API call the first time
-        to get the most up to date version of the chat (mostly when the event
-        doesn't belong to a channel), so keep that in mind.
-        """
-        if not self.input_chat:
-            return None
-
-        if self._chat is None:
-            self._chat = self._entities.get(utils.get_peer_id(self._input_chat))
-
-        if self._chat is None:
-            self._chat = self._client.get_entity(self._input_chat)
-
-        return self._chat
-
-    @property
-    def chat_id(self):
-        """
-        Returns the marked integer ID of the chat, if any.
-        """
-        if self._chat_peer:
-            return utils.get_peer_id(self._chat_peer)
 
     def __str__(self):
         return TLObject.pretty_format(self.to_dict())
@@ -206,17 +177,6 @@ class EventCommon(abc.ABC):
         d = {k: v for k, v in self.__dict__.items() if k[0] != '_'}
         d['_'] = self._event_name
         return d
-
-
-class Raw(EventBuilder):
-    """
-    Represents a raw event. The event is the update itself.
-    """
-    def resolve(self, client):
-        pass
-
-    def build(self, update):
-        return update
 
 
 def name_inner_event(cls):

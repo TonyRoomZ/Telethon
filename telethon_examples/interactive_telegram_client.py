@@ -1,13 +1,16 @@
+import asyncio
 import os
+import sys
+import time
 from getpass import getpass
 
+from telethon import TelegramClient, events
+from telethon.errors import SessionPasswordNeededError
+from telethon.network import ConnectionTcpAbridged
 from telethon.utils import get_display_name
 
-from telethon import ConnectionMode, TelegramClient
-from telethon.errors import SessionPasswordNeededError
-from telethon.tl.types import (
-    PeerChat, UpdateShortChatMessage, UpdateShortMessage
-)
+# Create a global variable to hold the loop we will be using
+loop = asyncio.get_event_loop()
 
 
 def sprint(string, *args, **kwargs):
@@ -40,6 +43,29 @@ def bytes_to_string(byte_count):
     )
 
 
+async def async_input(prompt):
+    """
+    Python's ``input()`` is blocking, which means the event loop we set
+    above can't be running while we're blocking there. This method will
+    let the loop run while we wait for input.
+    """
+    print(prompt, end='', flush=True)
+    return (await loop.run_in_executor(None, sys.stdin.readline)).rstrip()
+
+
+def get_env(name, message, cast=str):
+    """Helper to get environment variables interactively"""
+    if name in os.environ:
+        return os.environ[name]
+    while True:
+        value = input(message)
+        try:
+            return cast(value)
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            time.sleep(1)
+
+
 class InteractiveTelegramClient(TelegramClient):
     """Full featured Telegram client, meant to be used on an interactive
        session to see what Telethon is capable off -
@@ -49,12 +75,11 @@ class InteractiveTelegramClient(TelegramClient):
        talking to people, downloading media, and receiving updates.
     """
 
-    def __init__(self, session_user_id, user_phone, api_id, api_hash,
+    def __init__(self, session_user_id, api_id, api_hash,
                  proxy=None):
         """
         Initializes the InteractiveTelegramClient.
         :param session_user_id: Name of the *.session file.
-        :param user_phone: The phone of the user that will login.
         :param api_id: Telegram's api_id acquired through my.telegram.org.
         :param api_hash: Telegram's api_hash.
         :param proxy: Optional proxy tuple/dictionary.
@@ -70,48 +95,45 @@ class InteractiveTelegramClient(TelegramClient):
             # These parameters should be passed always, session name and API
             session_user_id, api_id, api_hash,
 
-            # You can optionally change the connection mode by using this enum.
-            # This changes how much data will be sent over the network with
-            # every request, and how it will be formatted. Default is
-            # ConnectionMode.TCP_FULL, and smallest is TCP_TCP_ABRIDGED.
-            connection_mode=ConnectionMode.TCP_ABRIDGED,
+            # You can optionally change the connection mode by passing a
+            # type or an instance of it. This changes how the sent packets
+            # look (low-level concept you normally shouldn't worry about).
+            # Default is ConnectionTcpFull, smallest is ConnectionTcpAbridged.
+            connection=ConnectionTcpAbridged,
 
             # If you're using a proxy, set it here.
-            proxy=proxy,
-
-            # If you want to receive updates, you need to start one or more
-            # "update workers" which are background threads that will allow
-            # you to run things when your update handlers (callbacks) are
-            # called with an Update object.
-            update_workers=1
+            proxy=proxy
         )
 
         # Store {message.id: message} map here so that we can download
         # media known the message ID, for every message having media.
         self.found_media = {}
 
-        # Calling .connect() may return False, so you need to assert it's
-        # True before continuing. Otherwise you may want to retry as done here.
+        # Calling .connect() may raise a connection error False, so you need
+        # to except those before continuing. Otherwise you may want to retry
+        # as done here.
         print('Connecting to Telegram servers...')
-        if not self.connect():
+        try:
+            loop.run_until_complete(self.connect())
+        except ConnectionError:
             print('Initial connection failed. Retrying...')
-            if not self.connect():
-                print('Could not connect to Telegram servers.')
-                return
+            loop.run_until_complete(self.connect())
 
         # If the user hasn't called .sign_in() or .sign_up() yet, they won't
         # be authorized. The first thing you must do is authorize. Calling
         # .sign_in() should only be done once as the information is saved on
         # the *.session file so you don't need to enter the code every time.
-        if not self.is_user_authorized():
+        if not loop.run_until_complete(self.is_user_authorized()):
             print('First run. Sending code request...')
-            self.sign_in(user_phone)
+            user_phone = input('Enter your phone: ')
+            loop.run_until_complete(self.sign_in(user_phone))
 
             self_user = None
             while self_user is None:
                 code = input('Enter the code you just received: ')
                 try:
-                    self_user = self.sign_in(code=code)
+                    self_user =\
+                        loop.run_until_complete(self.sign_in(code=code))
 
                 # Two-step verification may be enabled, and .sign_in will
                 # raise this error. If that's the case ask for the password.
@@ -121,15 +143,17 @@ class InteractiveTelegramClient(TelegramClient):
                     pw = getpass('Two step verification is enabled. '
                                  'Please enter your password: ')
 
-                    self_user = self.sign_in(password=pw)
+                    self_user =\
+                        loop.run_until_complete(self.sign_in(password=pw))
 
-    def run(self):
+    async def run(self):
         """Main loop of the TelegramClient, will wait for user action"""
 
-        # Once everything is ready, we can add an update handler. Every
-        # update object will be passed to the self.update_handler method,
-        # where we can process it as we need.
-        self.add_update_handler(self.update_handler)
+        # Once everything is ready, we can add an event handler.
+        #
+        # Events are an abstraction over Telegram's "Updates" and
+        # are much easier to use.
+        self.add_event_handler(self.message_handler, events.NewMessage)
 
         # Enter a while loop to chat as long as the user wants
         while True:
@@ -140,7 +164,7 @@ class InteractiveTelegramClient(TelegramClient):
 
             # Entities represent the user, chat or channel
             # corresponding to the dialog on the same index.
-            dialogs = self.get_dialogs(limit=dialog_count)
+            dialogs = await self.get_dialogs(limit=dialog_count)
 
             i = None
             while i is None:
@@ -157,7 +181,7 @@ class InteractiveTelegramClient(TelegramClient):
                 print('  !q: Quits the dialogs window and exits.')
                 print('  !l: Logs out, terminating this session.')
                 print()
-                i = input('Enter dialog ID or a command: ')
+                i = await async_input('Enter dialog ID or a command: ')
                 if i == '!q':
                     return
                 if i == '!l':
@@ -167,7 +191,7 @@ class InteractiveTelegramClient(TelegramClient):
                     #
                     # This is not the same as simply calling .disconnect(),
                     # which simply shuts down everything gracefully.
-                    self.log_out()
+                    await self.log_out()
                     return
 
                 try:
@@ -197,7 +221,7 @@ class InteractiveTelegramClient(TelegramClient):
 
             # And start a while loop to chat
             while True:
-                msg = input('Enter a message: ')
+                msg = await async_input('Enter a message: ')
                 # Quit
                 if msg == '!q':
                     break
@@ -207,16 +231,16 @@ class InteractiveTelegramClient(TelegramClient):
                 # History
                 elif msg == '!h':
                     # First retrieve the messages and some information
-                    messages = self.get_messages(entity, limit=10)
+                    messages = await self.get_messages(entity, limit=10)
 
                     # Iterate over all (in reverse order so the latest appear
                     # the last in the console) and print them with format:
                     # "[hh:mm] Sender: Message"
                     for msg in reversed(messages):
-                        # Note that the .sender attribute is only there for
-                        # convenience, the API returns it differently. But
-                        # this shouldn't concern us. See the documentation
-                        # for .iter_messages() for more information.
+                        # Note how we access .sender here. Since we made an
+                        # API call using the self client, it will always have
+                        # information about the sender. This is different to
+                        # events, where Telegram may not always send the user.
                         name = get_display_name(msg.sender)
 
                         # Format the message content
@@ -240,29 +264,33 @@ class InteractiveTelegramClient(TelegramClient):
                 # Send photo
                 elif msg.startswith('!up '):
                     # Slice the message to get the path
-                    self.send_photo(path=msg[len('!up '):], entity=entity)
+                    path = msg[len('!up '):]
+                    await self.send_photo(path=path, entity=entity)
 
                 # Send file (document)
                 elif msg.startswith('!uf '):
                     # Slice the message to get the path
-                    self.send_document(path=msg[len('!uf '):], entity=entity)
+                    path = msg[len('!uf '):]
+                    await self.send_document(path=path, entity=entity)
 
                 # Delete messages
                 elif msg.startswith('!d '):
                     # Slice the message to get message ID
-                    deleted_msg = self.delete_messages(entity, msg[len('!d '):])
+                    msg = msg[len('!d '):]
+                    deleted_msg = await self.delete_messages(entity, msg)
                     print('Deleted {}'.format(deleted_msg))
 
                 # Download media
                 elif msg.startswith('!dm '):
                     # Slice the message to get message ID
-                    self.download_media_by_id(msg[len('!dm '):])
+                    await self.download_media_by_id(msg[len('!dm '):])
 
                 # Download profile photo
                 elif msg == '!dp':
                     print('Downloading profile picture to usermedia/...')
                     os.makedirs('usermedia', exist_ok=True)
-                    output = self.download_profile_photo(entity, 'usermedia')
+                    output = await self.download_profile_photo(entity,
+                                                               'usermedia')
                     if output:
                         print('Profile picture downloaded to', output)
                     else:
@@ -276,26 +304,26 @@ class InteractiveTelegramClient(TelegramClient):
 
                 # Send chat message (if any)
                 elif msg:
-                    self.send_message(entity, msg, link_preview=False)
+                    await self.send_message(entity, msg, link_preview=False)
 
-    def send_photo(self, path, entity):
+    async def send_photo(self, path, entity):
         """Sends the file located at path to the desired entity as a photo"""
-        self.send_file(
+        await self.send_file(
             entity, path,
             progress_callback=self.upload_progress_callback
         )
         print('Photo sent!')
 
-    def send_document(self, path, entity):
+    async def send_document(self, path, entity):
         """Sends the file located at path to the desired entity as a document"""
-        self.send_file(
+        await self.send_file(
             entity, path,
             force_document=True,
             progress_callback=self.upload_progress_callback
         )
         print('Document sent!')
 
-    def download_media_by_id(self, media_id):
+    async def download_media_by_id(self, media_id):
         """Given a message ID, finds the media this message contained and
            downloads it.
         """
@@ -308,7 +336,7 @@ class InteractiveTelegramClient(TelegramClient):
 
         print('Downloading media to usermedia/...')
         os.makedirs('usermedia', exist_ok=True)
-        output = self.download_media(
+        output = await self.download_media(
             msg.media,
             file='usermedia/',
             progress_callback=self.download_progress_callback
@@ -334,31 +362,41 @@ class InteractiveTelegramClient(TelegramClient):
             bytes_to_string(total_bytes), downloaded_bytes / total_bytes)
         )
 
-    def update_handler(self, update):
-        """Callback method for received Updates"""
+    async def message_handler(self, event):
+        """Callback method for received events.NewMessage"""
 
-        # We have full control over what we want to do with the updates.
-        # In our case we only want to react to chat messages, so we use
-        # isinstance() to behave accordingly on these cases.
-        if isinstance(update, UpdateShortMessage):
-            who = self.get_entity(update.user_id)
-            if update.out:
+        # Note that message_handler is called when a Telegram update occurs
+        # and an event is created. Telegram may not always send information
+        # about the ``.sender`` or the ``.chat``, so if you *really* want it
+        # you should use ``get_chat()`` and ``get_sender()`` while working
+        # with events. Since they are methods, you know they may make an API
+        # call, which can be expensive.
+        chat = await event.get_chat()
+        if event.is_group:
+            if event.out:
+                sprint('>> sent "{}" to chat {}'.format(
+                    event.text, get_display_name(chat)
+                ))
+            else:
+                sprint('<< {} @ {} sent "{}"'.format(
+                    get_display_name(await event.get_sender()),
+                    get_display_name(chat),
+                    event.text
+                ))
+        else:
+            if event.out:
                 sprint('>> "{}" to user {}'.format(
-                    update.message, get_display_name(who)
+                    event.text, get_display_name(chat)
                 ))
             else:
                 sprint('<< {} sent "{}"'.format(
-                    get_display_name(who), update.message
+                    get_display_name(chat), event.text
                 ))
 
-        elif isinstance(update, UpdateShortChatMessage):
-            which = self.get_entity(PeerChat(update.chat_id))
-            if update.out:
-                sprint('>> sent "{}" to chat {}'.format(
-                    update.message, get_display_name(which)
-                ))
-            else:
-                who = self.get_entity(update.from_id)
-                sprint('<< {} @ {} sent "{}"'.format(
-                    get_display_name(which), get_display_name(who), update.message
-                ))
+
+if __name__ == '__main__':
+    SESSION = os.environ.get('TG_SESSION', 'interactive')
+    API_ID = get_env('TG_API_ID', 'Enter your API ID: ', int)
+    API_HASH = get_env('TG_API_HASH', 'Enter your API hash: ')
+    client = InteractiveTelegramClient(SESSION, API_ID, API_HASH)
+    loop.run_until_complete(client.run())

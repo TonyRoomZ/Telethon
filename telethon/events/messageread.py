@@ -1,6 +1,6 @@
 from .common import EventBuilder, EventCommon, name_inner_event
 from .. import utils
-from ..tl import types, functions
+from ..tl import types
 
 
 @name_inner_event
@@ -14,36 +14,41 @@ class MessageRead(EventBuilder):
             messages the event will be fired. By default (``False``) only
             when messages you sent are read by someone else will fire it.
     """
-    def __init__(self, inbox=False, chats=None, blacklist_chats=None):
-        super().__init__(chats, blacklist_chats)
+    def __init__(
+            self, chats=None, *, blacklist_chats=None, func=None, inbox=False):
+        super().__init__(chats, blacklist_chats=blacklist_chats, func=func)
         self.inbox = inbox
 
-    def build(self, update):
+    @classmethod
+    def build(cls, update):
         if isinstance(update, types.UpdateReadHistoryInbox):
-            event = MessageRead.Event(update.peer, update.max_id, False)
+            event = cls.Event(update.peer, update.max_id, False)
         elif isinstance(update, types.UpdateReadHistoryOutbox):
-            event = MessageRead.Event(update.peer, update.max_id, True)
+            event = cls.Event(update.peer, update.max_id, True)
         elif isinstance(update, types.UpdateReadChannelInbox):
-            event = MessageRead.Event(types.PeerChannel(update.channel_id),
+            event = cls.Event(types.PeerChannel(update.channel_id),
                                       update.max_id, False)
         elif isinstance(update, types.UpdateReadChannelOutbox):
-            event = MessageRead.Event(types.PeerChannel(update.channel_id),
-                                      update.max_id, True)
+            event = cls.Event(types.PeerChannel(update.channel_id),
+                              update.max_id, True)
         elif isinstance(update, types.UpdateReadMessagesContents):
-            event = MessageRead.Event(message_ids=update.messages,
-                                      contents=True)
+            event = cls.Event(message_ids=update.messages,
+                              contents=True)
         elif isinstance(update, types.UpdateChannelReadMessagesContents):
-            event = MessageRead.Event(types.PeerChannel(update.channel_id),
-                                      message_ids=update.messages,
-                                      contents=True)
+            event = cls.Event(types.PeerChannel(update.channel_id),
+                              message_ids=update.messages,
+                              contents=True)
         else:
             return
 
+        event._entities = update._entities
+        return event
+
+    def filter(self, event):
         if self.inbox == event.outbox:
             return
 
-        event._entities = update._entities
-        return self._filter_event(event)
+        return super().filter(event)
 
     class Event(EventCommon):
         """
@@ -88,28 +93,21 @@ class MessageRead(EventBuilder):
             """
             return self._message_ids
 
-        @property
-        def messages(self):
+        async def get_messages(self):
             """
-            The list of :tl:`Message` **which contents'** were read.
+            Returns the list of `telethon.tl.custom.message.Message`
+            **which contents'** were read.
 
             Use :meth:`is_read` if you need to check whether a message
             was read instead checking if it's in here.
             """
             if self._messages is None:
-                chat = self.input_chat
+                chat = await self.get_input_chat()
                 if not chat:
                     self._messages = []
-                elif isinstance(chat, types.InputPeerChannel):
-                    self._messages =\
-                        self._client(functions.channels.GetMessagesRequest(
-                            chat, self._message_ids
-                        )).messages
                 else:
-                    self._messages =\
-                        self._client(functions.messages.GetMessagesRequest(
-                            self._message_ids
-                        )).messages
+                    self._messages = await self._client.get_messages(
+                        chat, ids=self._message_ids)
 
             return self._messages
 

@@ -5,7 +5,7 @@ import re
 import shutil
 from collections import defaultdict
 
-from ..docs_writer import DocsWriter
+from ..docswriter import DocsWriter
 from ..parsers import TLObject
 from ..utils import snake_to_camel_case
 
@@ -33,14 +33,15 @@ def get_import_code(tlobject):
         .format(kind, ns, tlobject.class_name)
 
 
-def _get_create_path_for(root, tlobject):
+def _get_create_path_for(root, tlobject, make=True):
     """Creates and returns the path for the given TLObject at root."""
     out_dir = 'methods' if tlobject.is_function else 'constructors'
     if tlobject.namespace:
         out_dir = os.path.join(out_dir, tlobject.namespace)
 
     out_dir = os.path.join(root, out_dir)
-    os.makedirs(out_dir, exist_ok=True)
+    if make:
+        os.makedirs(out_dir, exist_ok=True)
     return os.path.join(out_dir, _get_file_name(tlobject))
 
 
@@ -67,7 +68,7 @@ def _get_relative_path(destination, relative_to, folder=False):
 
 def _find_title(html_file):
     """Finds the <title> for the given HTML file, or (Unknown)."""
-    with open(html_file) as fp:
+    with open(html_file, 'r') as fp:
         for line in fp:
             if '<title>' in line:
                 # + 7 to skip len('<title>')
@@ -79,7 +80,6 @@ def _find_title(html_file):
 def _build_menu(docs, filename, root, relative_main_index):
     """Builds the menu using the given DocumentWriter up to 'filename',
        which must be a file (it cannot be a directory)"""
-    # TODO Maybe this could be part of DocsWriter itself, "build path menu"
     filename = _get_relative_path(filename, root)
     docs.add_menu('API', relative_main_index)
 
@@ -95,42 +95,75 @@ def _build_menu(docs, filename, root, relative_main_index):
     docs.end_menu()
 
 
-def _generate_index(folder, original_paths, root):
+def _generate_index(folder, original_paths, root,
+                    bots_index=False, bots_index_paths=()):
     """Generates the index file for the specified folder"""
     # Determine the namespaces listed here (as sub folders)
     # and the files (.html files) that we should link to
     namespaces = []
     files = []
-    for item in os.listdir(folder):
-        if os.path.isdir(os.path.join(folder, item)):
-            namespaces.append(item)
-        elif item != 'index.html':
-            files.append(item)
+    INDEX = 'index.html'
+    BOT_INDEX = 'botindex.html'
+
+    if not bots_index:
+        for item in os.listdir(folder):
+            if os.path.isdir(os.path.join(folder, item)):
+                namespaces.append(item)
+            elif item not in (INDEX, BOT_INDEX):
+                files.append(item)
+    else:
+        # bots_index_paths should be a list of "namespace/method.html"
+        # or "method.html"
+        for item in bots_index_paths:
+            dirname = os.path.dirname(item)
+            if dirname and dirname not in namespaces:
+                namespaces.append(dirname)
+            elif not dirname and item not in (INDEX, BOT_INDEX):
+                files.append(item)
 
     paths = {k: _get_relative_path(v, folder, folder=True)
              for k, v in original_paths.items()}
 
     # Now that everything is setup, write the index.html file
-    filename = os.path.join(folder, 'index.html')
+    filename = os.path.join(folder, BOT_INDEX if bots_index else INDEX)
     with DocsWriter(filename, type_to_path=_get_path_for_type) as docs:
         # Title should be the current folder name
-        docs.write_head(folder.title(), relative_css_path=paths['css'])
+        docs.write_head(folder.title(),
+                        relative_css_path=paths['css'],
+                        default_css=original_paths['default_css'])
 
         docs.set_menu_separator(paths['arrow'])
         _build_menu(docs, filename, root,
                     relative_main_index=paths['index_all'])
 
         docs.write_title(_get_relative_path(folder, root, folder=True).title())
+        if bots_index:
+            docs.write_text('These are the methods that you can use as a bot. '
+                            'Click <a href="{}">here</a> to '
+                            'view them all.'.format(INDEX))
+        else:
+            docs.write_text('Click <a href="{}">here</a> to view the methods '
+                            'that you can use as a bot.'.format(BOT_INDEX))
         if namespaces:
             docs.write_title('Namespaces', level=3)
             docs.begin_table(4)
             namespaces.sort()
             for namespace in namespaces:
                 # For every namespace, also write the index of it
+                namespace_paths = []
+                if bots_index:
+                    for item in bots_index_paths:
+                        if os.path.dirname(item) == namespace:
+                            namespace_paths.append(os.path.basename(item))
                 _generate_index(os.path.join(folder, namespace),
-                                original_paths, root)
-                docs.add_row(namespace.title(),
-                             link=os.path.join(namespace, 'index.html'))
+                                original_paths, root,
+                                bots_index, namespace_paths)
+                if bots_index:
+                    docs.add_row(namespace.title(),
+                                 link=os.path.join(namespace, BOT_INDEX))
+                else:
+                    docs.add_row(namespace.title(),
+                                 link=os.path.join(namespace, INDEX))
 
             docs.end_table()
 
@@ -155,10 +188,12 @@ def _get_description(arg):
         desc.append('If left unspecified, it will be inferred automatically.')
         otherwise = True
     elif arg.is_flag:
-        desc.append('This argument can be omitted.')
+        desc.append('This argument defaults to '
+                    '<code>None</code> and can be omitted.')
         otherwise = True
 
-    if arg.type in {'InputPeer', 'InputUser', 'InputChannel'}:
+    if arg.type in {'InputPeer', 'InputUser', 'InputChannel',
+                    'InputNotifyPeer', 'InputDialogPeer'}:
         desc.append(
             'Anything entity-like will work if the library can find its '
             '<code>Input</code> version (e.g., usernames, <code>Peer</code>, '
@@ -188,7 +223,7 @@ def _get_description(arg):
 
 def _copy_replace(src, dst, replacements):
     """Copies the src file into dst applying the replacements dict"""
-    with open(src) as infile, open(dst, 'w') as outfile:
+    with open(src, 'r') as infile, open(dst, 'w') as outfile:
         outfile.write(re.sub(
             '|'.join(re.escape(k) for k in replacements),
             lambda m: str(replacements[m.group(0)]),
@@ -204,13 +239,13 @@ def _write_html_pages(tlobjects, errors, layer, input_res, output_dir):
     # Save 'Type: [Constructors]' for use in both:
     # * Seeing the return type or constructors belonging to the same type.
     # * Generating the types documentation, showing available constructors.
-    # TODO Tried using 'defaultdict(list)' with strange results, make it work.
     original_paths = {
-        'css': 'css/docs.css',
+        'css': 'css',
         'arrow': 'img/arrow.svg',
         'search.js': 'js/search.js',
         '404': '404.html',
         'index_all': 'index.html',
+        'bot_index': 'botindex.html',
         'index_types': 'types/index.html',
         'index_methods': 'methods/index.html',
         'index_constructors': 'constructors/index.html'
@@ -218,17 +253,20 @@ def _write_html_pages(tlobjects, errors, layer, input_res, output_dir):
     original_paths = {k: os.path.join(output_dir, v)
                       for k, v in original_paths.items()}
 
-    type_to_constructors = {}
-    type_to_functions = {}
+    original_paths['default_css'] = 'light'  # docs.<name>.css, local path
+    type_to_constructors = defaultdict(list)
+    type_to_functions = defaultdict(list)
     for tlobject in tlobjects:
         d = type_to_functions if tlobject.is_function else type_to_constructors
-        if tlobject.result in d:
-            d[tlobject.result].append(tlobject)
-        else:
-            d[tlobject.result] = [tlobject]
+        d[tlobject.result].append(tlobject)
 
     for t, cs in type_to_constructors.items():
         type_to_constructors[t] = list(sorted(cs, key=lambda c: c.name))
+
+    # Telegram may send errors with the same str_code but different int_code.
+    # They are all imported on telethon.errors anyway so makes no difference.
+    errors = list(sorted({e.str_code: e for e in errors}.values(),
+                         key=lambda e: e.name))
 
     method_causes_errors = defaultdict(list)
     for error in errors:
@@ -238,6 +276,7 @@ def _write_html_pages(tlobjects, errors, layer, input_res, output_dir):
     # Since the output directory is needed everywhere partially apply it now
     create_path_for = functools.partial(_get_create_path_for, output_dir)
     path_for_type = functools.partial(_get_path_for_type, output_dir)
+    bot_docs_paths = []
 
     for tlobject in tlobjects:
         filename = create_path_for(tlobject)
@@ -246,7 +285,8 @@ def _write_html_pages(tlobjects, errors, layer, input_res, output_dir):
 
         with DocsWriter(filename, type_to_path=path_for_type) as docs:
             docs.write_head(title=tlobject.class_name,
-                            relative_css_path=paths['css'])
+                            relative_css_path=paths['css'],
+                            default_css=original_paths['default_css'])
 
             # Create the menu (path to the current TLObject)
             docs.set_menu_separator(paths['arrow'])
@@ -255,6 +295,13 @@ def _write_html_pages(tlobjects, errors, layer, input_res, output_dir):
 
             # Create the page title
             docs.write_title(tlobject.class_name)
+
+            if tlobject.is_function:
+                docs.write_text('Bots <strong>can{}</strong> use this method. '
+                                '<a href="#examples">See code examples.</a>'
+                                .format("" if tlobject.bot_usable else "'t"))
+                if tlobject.is_function and tlobject.bot_usable:
+                    bot_docs_paths.append(filename)
 
             # Write the code definition for this TLObject
             docs.write_code(tlobject)
@@ -326,11 +373,12 @@ def _write_html_pages(tlobjects, errors, layer, input_res, output_dir):
                                  bold=True)
 
                     # Type row
+                    friendly_type = 'flag' if arg.type == 'true' else arg.type
                     if arg.is_generic:
-                        docs.add_row('!' + arg.type, align='center')
+                        docs.add_row('!' + friendly_type, align='center')
                     else:
                         docs.add_row(
-                            arg.type, align='center', link=
+                            friendly_type, align='center', link=
                             path_for_type(arg.type, relative_to=filename)
                          )
 
@@ -363,11 +411,37 @@ def _write_html_pages(tlobjects, errors, layer, input_res, output_dir):
                     docs.write_text('You can import these from '
                                     '<code>telethon.errors</code>.')
 
-            # TODO Bit hacky, make everything like this? (prepending '../')
+                docs.write_title('Example', id='examples')
+                docs.write(
+                    '<pre>from telethon.sync import TelegramClient\n'
+                    'from telethon import functions, types\n'
+                    '\n'
+                    'with TelegramClient(name, api_id, api_hash) as client:\n'
+                    '    result = client(')
+                tlobject.as_example(docs, indent=1)
+                docs.write(')\n')
+                if tlobject.result.startswith('Vector'):
+                    docs.write(
+                        '    for x in result:\n'
+                        '        print(x'
+                    )
+                else:
+                    docs.write('    print(result')
+                    if tlobject.result != 'Bool' \
+                            and not tlobject.result.startswith('Vector'):
+                        docs.write('.stringify()')
+
+                docs.write(')</pre>')
+
             depth = '../' * (2 if tlobject.namespace else 1)
             docs.add_script(src='prependPath = "{}";'.format(depth))
             docs.add_script(relative_src=paths['search.js'])
             docs.end_body()
+
+    temp = []
+    for item in bot_docs_paths:
+        temp.append(os.path.sep.join(item.split(os.path.sep)[2:]))
+    bot_docs_paths = temp
 
     # Find all the available types (which are not the same as the constructors)
     # Each type has a list of constructors associated to it, hence is a map
@@ -387,9 +461,9 @@ def _write_html_pages(tlobjects, errors, layer, input_res, output_dir):
                  for k, v in original_paths.items()}
 
         with DocsWriter(filename, type_to_path=path_for_type) as docs:
-            docs.write_head(
-                title=snake_to_camel_case(name),
-                relative_css_path=paths['css'])
+            docs.write_head(title=snake_to_camel_case(name),
+                            relative_css_path=paths['css'],
+                            default_css=original_paths['default_css'])
 
             docs.set_menu_separator(paths['arrow'])
             _build_menu(docs, filename, output_dir,
@@ -439,9 +513,9 @@ def _write_html_pages(tlobjects, errors, layer, input_res, output_dir):
             # List all the methods which take this type as input
             docs.write_title('Methods accepting this type as input', level=3)
             other_methods = sorted(
-                (t for t in tlobjects
-                 if any(t == a.type for a in t.args) and t.is_function),
-                key=lambda t: t.name
+                (u for u in tlobjects
+                 if any(a.type == t for a in u.args) and u.is_function),
+                key=lambda u: u.name
             )
             if not other_methods:
                 docs.write_text(
@@ -464,10 +538,9 @@ def _write_html_pages(tlobjects, errors, layer, input_res, output_dir):
             # List every other type which has this type as a member
             docs.write_title('Other types containing this type', level=3)
             other_types = sorted(
-                (t for t in tlobjects
-                 if any(t == a.type for a in t.args)
-                 and not t.is_function
-                 ), key=lambda t: t.name
+                (u for u in tlobjects
+                 if any(a.type == t for a in u.args) and not u.is_function),
+                key=lambda u: u.name
             )
 
             if not other_types:
@@ -496,6 +569,9 @@ def _write_html_pages(tlobjects, errors, layer, input_res, output_dir):
     for folder in ['types', 'methods', 'constructors']:
         _generate_index(os.path.join(output_dir, folder), original_paths,
                         output_dir)
+
+    _generate_index(os.path.join(output_dir, 'methods'), original_paths,
+                    output_dir, True, bot_docs_paths)
 
     # Write the final core index, the main index for the rest of files
     types = set()
@@ -545,7 +621,7 @@ def _write_html_pages(tlobjects, errors, layer, input_res, output_dir):
     type_names = fmt(types, formatter=lambda x: x)
 
     # Local URLs shouldn't rely on the output's root, so set empty root
-    create_path_for = functools.partial(_get_create_path_for, '')
+    create_path_for = functools.partial(_get_create_path_for, '', make=False)
     path_for_type = functools.partial(_get_path_for_type, '')
     request_urls = fmt(methods, create_path_for)
     type_urls = fmt(types, path_for_type)
@@ -566,7 +642,8 @@ def _write_html_pages(tlobjects, errors, layer, input_res, output_dir):
 
 
 def _copy_resources(res_dir, out_dir):
-    for dirname, files in [('css', ['docs.css']), ('img', ['arrow.svg'])]:
+    for dirname, files in [('css', ['docs.light.css', 'docs.dark.css']),
+                           ('img', ['arrow.svg'])]:
         dirpath = os.path.join(out_dir, dirname)
         os.makedirs(dirpath, exist_ok=True)
         for file in files:

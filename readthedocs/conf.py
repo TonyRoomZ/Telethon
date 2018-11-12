@@ -20,7 +20,8 @@
 import re
 import os
 import sys
-sys.path.insert(0, os.path.abspath('.'))
+sys.path.insert(0, os.path.abspath(os.curdir))
+sys.path.insert(0, os.path.abspath(os.pardir))
 
 
 root = os.path.abspath(os.path.join(__file__, os.path.pardir, os.path.pardir))
@@ -67,7 +68,7 @@ author = 'Lonami'
 # built documents.
 #
 # The short X.Y version.
-with open(os.path.join(root, 'telethon', 'version.py')) as f:
+with open(os.path.join(root, 'telethon', 'version.py'), 'r') as f:
     version = re.search(r"^__version__\s+=\s+'(.*)'$",
                         f.read(), flags=re.MULTILINE).group(1)
 

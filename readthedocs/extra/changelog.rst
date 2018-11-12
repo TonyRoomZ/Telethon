@@ -14,6 +14,936 @@ it can take advantage of new goodies!
 .. contents:: List of All Versions
 
 
+Connection Overhaul (v1.4)
+==========================
+
+*Published at 2018/11/03*
+
+Yet again, a lot of work has been put into reworking the low level connection
+classes. This means ``asyncio.open_connection`` is now used correctly and the
+errors it can produce are handled properly. The separation between packing,
+encrypting and network is now abstracted away properly, so reasoning about
+the code is easier, making it more maintainable.
+
+As a user, you shouldn't worry about this, other than being aware that quite
+a few changes were made in the insides of the library and you should report
+any issues that you encounter with this version if any.
+
+
+Breaking Changes
+~~~~~~~~~~~~~~~~
+
+* The threaded version of the library will no longer be maintained, primarily
+  because it never was properly maintained anyway. If you have old code, stick
+  with old versions of the library, such as ``0.19.1.6``.
+* Timeouts no longer accept ``timedelta``. Simply use seconds.
+* The ``callback`` parameter from `telethon.tl.custom.button.Button.inline()`
+  was removed, since it had always been a bad idea. Adding the callback there
+  meant a lot of extra work for every message sent, and only registering it
+  after the first message was sent! Instead, use
+  `telethon.events.callbackquery.CallbackQuery`.
+
+
+Additions
+~~~~~~~~~
+
+* New `dialog.delete() <telethon.tl.custom.dialog.Dialog.delete>` method.
+* New `conversation.cancel()
+  <telethon.tl.custom.conversation.Conversation.cancel>` method.
+* New ``retry_delay`` delay for the client to be used on auto-reconnection.
+
+
+Bug fixes
+~~~~~~~~~
+
+* Fixed `Conversation.wait_event()
+  <telethon.tl.custom.conversation.Conversation.wait_event>`.
+* Fixed replying with photos/documents on inline results.
+* `client.is_user_authorized()
+  <telethon.client.users.UserMethods.is_user_authorized>` now works
+  correctly after `client.log_out()
+  <telethon.client.auth.AuthMethods.log_out>`.
+* `dialog.is_group <telethon.tl.custom.dialog.Dialog>` now works for
+  :tl:`ChatForbidden`.
+* Not using ``async with`` when needed is now a proper error.
+* `events.CallbackQuery <telethon.events.callbackquery.CallbackQuery>`
+  with string regex was not working properly.
+* `client.get_entity('me') <telethon.client.users.UserMethods.get_entity>`
+  now works again.
+* Empty codes when signing in are no longer valid.
+* Fixed file cache for in-memory sessions.
+
+
+Enhancements
+~~~~~~~~~~~~
+
+* Support ``next_offset`` in `inline_query.answer()
+  <telethon.events.inlinequery.InlineQuery.Event.answer>`.
+* Support ``<a href="tg://user?id=123">`` mentions in HTML parse mode.
+* New auto-casts for :tl:`InputDocument` and :tl:`InputChatPhoto`.
+* Conversations are now exclusive per-chat by default.
+* The request that caused a RPC error is now shown in the error message.
+* New full API examples in the generated documentation.
+* Fixed some broken links in the documentation.
+* `client.disconnect()
+  <telethon.client.telegrambaseclient.TelegramBaseClient.disconnect>`
+  is now synchronous, but you can still ``await`` it for consistency
+  or compatibility.
+
+
+Event Templates (v1.3)
+======================
+
+*Published at 2018/09/22*
+
+
+If you have worked with Flask templates, you will love this update,
+since it gives you the same features but even more conveniently:
+
+.. code-block:: python
+
+    # handlers/welcome.py
+    from telethon import events
+
+    @events.register(events.NewMessage('(?i)hello'))
+    async def handler(event):
+        client = event.client
+        await event.respond('Hi!')
+        await client.send_message('me', 'Sent hello to someone')
+
+
+This will `register <telethon.events.register>` the ``handler`` callback
+to handle new message events. Note that you didn't add this to any client
+yet, and this is the key point: you don't need a client to define handlers!
+You can add it later:
+
+.. code-block:: python
+
+    # main.py
+    from telethon import TelegramClient
+    import handlers.welcome
+
+    with TelegramClient(...) as client:
+        # This line adds the handler we defined before for new messages
+        client.add_event_handler(handlers.welcome.handler)
+        client.run_until_disconnected()
+
+
+This should help you to split your big code base into a more modular design.
+
+
+Breaking Changes
+~~~~~~~~~~~~~~~~
+
+* ``.sender`` is the ``.chat`` when the message is sent in a broadcast
+  channel. This makes sense, because the sender of the message was the
+  channel itself, but you now must take into consideration that it may
+  be either a :tl:`User` or :tl:`Channel` instead of being ``None``.
+
+
+Additions
+~~~~~~~~~
+
+* New ``MultiError`` class when invoking many requests at once
+  through ``client([requests])``.
+* New custom ``func=`` on all events. These will receive the entire
+  event, and a good usage example is ``func=lambda e: e.is_private``.
+* New ``.web_preview`` field on messages. The ``.photo`` and ``.document``
+  will also return the media in the web preview if any, for convenience.
+* Callback queries now have a ``.chat`` in most circumstances.
+
+
+Bug fixes
+~~~~~~~~~
+
+* Running code with `python3 -O` would remove critical code from asserts.
+* Fix some rare ghost disconnections after reconnecting.
+* Fix strange behavior for `send_message(chat, Message, reply_to=foo)
+  <telethon.client.messages.MessageMethods.send_message>`.
+* The ``loop=`` argument was being pretty much ignored.
+* Fix ``MemorySession`` file caching.
+* The logic for getting entities from their username is now correct.
+* Fixes for sending stickers from ``.webp`` files in Windows, again.
+* Fix disconnection without being logged in.
+* Retrieving media from messages would fail.
+* Getting some messages by ID on private chats.
+
+
+Enhancements
+~~~~~~~~~~~~
+
+* `iter_participants <telethon.client.chats.ChatMethods.iter_participants>`
+  will now use its ``search=`` as a symbol set when ``aggressive=True``,
+  so you can do ``client.get_participants(group, aggressive=True,
+  search='абвгдеёжзийклмнопрст')``.
+* The ``StringSession`` supports custom encoding.
+* Callbacks for `telethon.client.auth.AuthMethods.start` can be ``async``.
+
+
+Internal changes
+~~~~~~~~~~~~~~~~
+
+* Cherry-picked a commit to use ``asyncio.open_connection`` in the lowest
+  level of the library. Do open issues if this causes trouble, but it should
+  otherwise improve performance and reliability.
+* Building and resolving events overhaul.
+
+
+Conversations, String Sessions and More (v1.2)
+==============================================
+
+*Published at 2018/08/14*
+
+
+This is a big release! Quite a few things have been added to the library,
+such as the new `Conversation <telethon.tl.custom.conversation.Conversation>`.
+This makes it trivial to get tokens from `@BotFather <https://t.me/BotFather>`_:
+
+.. code-block:: python
+
+    from telethon.tl import types
+
+    with client.conversation('BotFather') as conv:
+        conv.send_message('/mybots')
+        message = conv.get_response()
+        message.click(0)
+        message = conv.get_edit()
+        message.click(0)
+        message = conv.get_edit()
+        for _, token in message.get_entities_text(types.MessageEntityCode):
+            print(token)
+
+
+In addition to that, you can now easily load and export session files
+without creating any on-disk file thanks to the ``StringSession``:
+
+.. code-block:: python
+
+    from telethon.sessions import StringSession
+    string = StringSession.save(client.session)
+
+Check out :ref:`sessions` for more details.
+
+For those who aren't able to install ``cryptg``, the support for ``libssl``
+has been added back. While interfacing ``libssl`` is not as fast, the speed
+when downloading and sending files should really be noticeably faster.
+
+While those are the biggest things, there are still more things to be
+excited about.
+
+
+Additions
+~~~~~~~~~
+
+- The mentioned method to start a new `client.conversation
+  <telethon.client.dialogs.DialogMethods.conversation>`.
+- Implemented global search through `client.iter_messages
+  <telethon.client.messages.MessageMethods.iter_messages>`
+  with ``None`` entity.
+- New `client.inline_query <telethon.client.bots.BotMethods.inline_query>`
+  method to perform inline queries.
+- Bot-API-style ``file_id`` can now be used to send files and download media.
+  You can also access `telethon.utils.resolve_bot_file_id` and
+  `telethon.utils.pack_bot_file_id` to resolve and create these
+  file IDs yourself. Note that each user has its own ID for each file
+  so you can't use a bot's ``file_id`` with your user, except stickers.
+- New `telethon.utils.get_peer`, useful when you expect a :tl:`Peer`.
+
+Bug fixes
+~~~~~~~~~
+
+- UTC timezone for `telethon.events.userupdate.UserUpdate`.
+- Bug with certain input parameters when iterating messages.
+- RPC errors without parent requests caused a crash, and better logging.
+- ``incoming = outgoing = True`` was not working properly.
+- Getting a message's ID was not working.
+- File attributes not being inferred for ``open()``'ed files.
+- Use ``MemorySession`` if ``sqlite3`` is not installed by default.
+- Self-user would not be saved to the session file after signing in.
+- `client.catch_up() <telethon.client.updates.UpdateMethods.catch_up>`
+  seems to be functional again.
+
+
+Enhancements
+~~~~~~~~~~~~
+
+- Updated documentation.
+- Invite links will now use cache, so using them as entities is cheaper.
+- You can reuse message buttons to send new messages with those buttons.
+- ``.to_dict()`` will now work even on invalid ``TLObject``'s.
+
+
+Better Custom Message (v1.1.1)
+==============================
+
+*Published at 2018/07/23*
+
+The `custom.Message <telethon.tl.custom.message.Message>` class has been
+rewritten in a cleaner way and overall feels less hacky in the library.
+This should perform better than the previous way in which it was patched.
+
+The release is primarily intended to test this big change, but also fixes
+**Python 3.5.2 compatibility** which was broken due to a trailing comma.
+
+
+Bug fixes
+~~~~~~~~~
+
+- Using ``functools.partial`` on event handlers broke updates
+  if they had uncaught exceptions.
+- A bug under some session files where the sender would export
+  authorization for the same data center, which is unsupported.
+- Some logical bugs in the custom message class.
+
+
+Bot Friendly (v1.1)
+===================
+
+*Published at 2018/07/21*
+
+Two new event handlers to ease creating normal bots with the library,
+namely `events.InlineQuery <telethon.events.inlinequery.InlineQuery>`
+and `events.CallbackQuery <telethon.events.callbackquery.CallbackQuery>`
+for handling ``@InlineBot queries`` or reacting to a button click. For
+this second option, there is an even better way:
+
+.. code-block:: python
+
+    from telethon.tl.custom import Button
+
+    async def callback(event):
+        await event.edit('Thank you!')
+
+    bot.send_message(chat, 'Hello!',
+                     buttons=Button.inline('Click me', callback))
+
+
+You can directly pass the callback when creating the button.
+
+This is fine for small bots but it will add the callback every time
+you send a message, so you probably should do this instead once you
+are done testing:
+
+.. code-block:: python
+
+    markup = bot.build_reply_markup(Button.inline('Click me', callback))
+    bot.send_message(chat, 'Hello!', buttons=markup)
+
+
+And yes, you can create more complex button layouts with lists:
+
+.. code-block:: python
+
+    from telethon import events
+
+    global phone = ''
+
+    @bot.on(events.CallbackQuery)
+    async def handler(event):
+        global phone
+        if event.data == b'<':
+            phone = phone[:-1]
+        else:
+            phone += event.data.decode('utf-8')
+
+        await event.answer('Phone is now {}'.format(phone))
+
+    markup = bot.build_reply_markup([
+        [Button.inline('1'), Button.inline('2'), Button.inline('3')],
+        [Button.inline('4'), Button.inline('5'), Button.inline('6')],
+        [Button.inline('7'), Button.inline('8'), Button.inline('9')],
+        [Button.inline('+'), Button.inline('0'), Button.inline('<')],
+    ])
+    bot.send_message(chat, 'Enter a phone', buttons=markup)
+
+
+(Yes, there are better ways to do this). Now for the rest of things:
+
+
+Additions
+~~~~~~~~~
+
+- New `custom.Button <telethon.tl.custom.button.Button>` class
+  to help you create inline (or normal) reply keyboards. You
+  must sign in as a bot to use the ``buttons=`` parameters.
+- New events usable if you sign in as a bot: `events.InlineQuery
+  <telethon.events.inlinequery.InlineQuery>` and `events.CallbackQuery
+  <telethon.events.callbackquery.CallbackQuery>`.
+- New ``silent`` parameter when sending messages, usable in broadcast channels.
+- Documentation now has an entire section dedicate to how to use
+  the client's friendly methods at :ref:`telegram-client-example`.
+
+Bug fixes
+~~~~~~~~~
+
+- Empty ``except`` are no longer used which means
+  sending a keyboard interrupt should now work properly.
+- The ``pts`` of incoming updates could be ``None``.
+- UTC timezone information is properly set for read ``datetime``.
+- Some infinite recursion bugs in the custom message class.
+- :tl:`Updates` was being dispatched to raw handlers when it shouldn't.
+- Using proxies and HTTPS connection mode may now work properly.
+- Less flood waits when downloading media from different data centers,
+  and the library will now detect them even before sending requests.
+
+Enhancements
+~~~~~~~~~~~~
+
+- Interactive sign in now supports signing in with a bot token.
+- ``timedelta`` is now supported where a date is expected, which
+  means you can e.g. ban someone for ``timedelta(minutes=5)``.
+- Events are only built once and reused many times, which should
+  save quite a few CPU cycles if you have a lot of the same type.
+- You can now click inline buttons directly if you know their data.
+
+Internal changes
+~~~~~~~~~~~~~~~~
+
+- When downloading media, the right sender is directly
+  used without previously triggering migrate errors.
+- Code reusing for getting the chat and the sender,
+  which easily enables this feature for new types.
+
+
+New HTTP(S) Connection Mode (v1.0.4)
+====================================
+
+*Published at 2018/07/09*
+
+This release implements the HTTP connection mode to the library, which
+means certain proxies that only allow HTTP connections should now work
+properly. You can use it doing the following, like any other mode:
+
+.. code-block:: python
+
+    from telethon import TelegramClient, sync
+    from telethon.network import ConnectionHttp
+
+    client = TelegramClient(..., connection=ConnectionHttp)
+    with client:
+        client.send_message('me', 'Hi!')
+
+
+Additions
+~~~~~~~~~
+
+- ``add_mark=`` is now back on ``utils.get_input_peer`` and also on
+  `client.get_input_entity <telethon.client.users.UserMethods.get_input_entity>`.
+- New `client.get_peer_id <telethon.client.users.UserMethods.get_peer_id>`
+  convenience for ``utils.get_peer_id(await client.get_input_entity(peer))``.
+
+
+Bug fixes
+~~~~~~~~~
+
+- If several `TLMessage` in a `MessageContainer` exceeds 1MB, it will no
+  longer be automatically turned into one. This basically means that e.g.
+  uploading 10 file parts at once will work properly again.
+- Documentation fixes and some missing ``await``.
+- Revert named argument for `client.forward_messages
+  <telethon.client.messages.MessageMethods.forward_messages>`
+
+Enhancements
+~~~~~~~~~~~~
+
+- New auto-casts to :tl:`InputNotifyPeer` and ``chat_id``.
+
+Internal changes
+~~~~~~~~~~~~~~~~
+
+- Outgoing `TLMessage` are now pre-packed so if there's an error when
+  serializing the raw requests, the library will no longer swallow it.
+  This also means re-sending packets doesn't need to re-pack their bytes.
+
+
+
+Iterate Messages in Reverse (v1.0.3)
+====================================
+
+*Published at 2018/07/04*
+
++-----------------------+
+| Scheme layer used: 82 |
++-----------------------+
+
+Mostly bug fixes, but now there is a new parameter on `client.iter_messages
+<telethon.client.messages.MessageMethods.iter_messages>` to support reversing
+the order in which messages are returned.
+
+Additions
+~~~~~~~~~
+
+- The mentioned ``reverse`` parameter when iterating over messages.
+- A new ``sequential_updates`` parameter when creating the client
+  for updates to be processed sequentially. This is useful when you
+  need to make sure that all updates are processed in order, such
+  as a script that only forwards incoming messages somewhere else.
+
+Bug fixes
+~~~~~~~~~
+
+- Count was always ``None`` for `message.button_count
+  <telethon.tl.custom.message.Message.button_count>`.
+- Some fixes when disconnecting upon dropping the client.
+- Support for Python 3.4 in the sync version, and fix media download.
+- Some issues with events when accessing the input chat or their media.
+- Hachoir wouldn't automatically close the file after reading its metadata.
+- Signing in required a named ``code=`` parameter, but usage
+  without a name was really widespread so it has been reverted.
+
+
+Bug Fixes (v1.0.2)
+==================
+
+*Published at 2018/06/28*
+
+Updated some asserts and parallel downloads, as well as some fixes for sync.
+
+
+Bug Fixes (v1.0.1)
+==================
+
+*Published at 2018/06/27*
+
+And as usual, every major release has a few bugs that make the library
+unusable! This quick update should fix those, namely:
+
+Bug fixes
+~~~~~~~~~
+
+- `client.start() <telethon.client.auth.AuthMethods.start>` was completely
+  broken due to a last-time change requiring named arguments everywhere.
+- Since the rewrite, if your system clock was wrong, the connection would
+  get stuck in an infinite "bad message" loop of responses from Telegram.
+- Accessing the buttons of a custom message wouldn't work in channels,
+  which lead to fix a completely different bug regarding starting bots.
+- Disconnecting could complain if the magic ``telethon.sync`` was imported.
+- Successful automatic reconnections now ask Telegram to send updates to us
+  once again as soon as the library is ready to listen for them.
+
+
+Synchronous magic (v1.0)
+========================
+
+*Published at 2018/06/27*
+
+.. important::
+
+    If you come from Telethon pre-1.0 you **really** want to read
+    :ref:`compatibility-and-convenience` to port your scripts to
+    the new version.
+
+The library has been around for well over a year. A lot of improvements have
+been made, a lot of user complaints have been fixed, and a lot of user desires
+have been implemented. It's time to consider the public API as stable, and
+remove some of the old methods that were around until now for compatibility
+reasons. But there's one more surprise!
+
+There is a new magic ``telethon.sync`` module to let you use **all** the
+methods in the :ref:`TelegramClient <telethon-client>` (and the types returned
+from its functions) in a synchronous way, while using ``asyncio`` behind
+the scenes! This means you're now able to do both of the following:
+
+.. code-block:: python
+
+    import asyncio
+
+    async def main():
+      await client.send_message('me', 'Hello!')
+
+    asyncio.get_event_loop().run_until_complete(main())
+
+    # ...can be rewritten as:
+
+    from telethon import sync
+    client.send_message('me', 'Hello!')
+
+Both ways can coexist (you need to ``await`` if the loop is running).
+
+You can also use the magic ``sync`` module in your own classes, and call
+``sync.syncify(cls)`` to convert all their ``async def`` into magic variants.
+
+
+
+Breaking Changes
+~~~~~~~~~~~~~~~~
+
+- ``message.get_fwd_sender`` is now in `message.forward
+  <telethon.tl.custom.message.Message.forward>`.
+- ``client.idle`` is now `client.run_until_disconnected()
+  <telethon.client.updates.UpdateMethods.run_until_disconnected>`
+- ``client.add_update_handler`` is now `client.add_event_handler
+  <telethon.client.updates.UpdateMethods.add_event_handler>`
+- ``client.remove_update_handler`` is now `client.remove_event_handler
+  <telethon.client.updates.UpdateMethods.remove_event_handler>`
+- ``client.list_update_handlers`` is now `client.list_event_handlers
+  <telethon.client.updates.UpdateMethods.list_event_handlers>`
+- ``client.get_message_history`` is now `client.get_messages
+  <telethon.client.messages.MessageMethods.get_messages>`
+- ``client.send_voice_note`` is now `client.send_file
+  <telethon.client.uploads.UploadMethods.send_file>` with ``is_voice=True``.
+- ``client.invoke()`` is now ``client(...)``.
+- ``report_errors`` has been removed since it's currently not used,
+  and ``flood_sleep_threshold`` is now part of the client.
+- The ``update_workers`` and ``spawn_read_thread`` arguments are gone.
+  Simply remove them from your code when you create the client.
+- Methods with a lot of arguments can no longer be used without specifying
+  their argument. Instead you need to use named arguments. This improves
+  readability and not needing to learn the order of the arguments, which
+  can also change.
+
+
+Additions
+~~~~~~~~~
+
+- `client.send_file <telethon.client.uploads.UploadMethods.send_file>` now
+  accepts external ``http://`` and ``https://`` URLs.
+- You can use the :ref:`TelegramClient <telethon-client>` inside of ``with``
+  blocks, which will `client.start() <telethon.client.auth.AuthMethods.start>`
+  and `disconnect() <telethon.client.telegrambaseclient.TelegramBaseClient.disconnect>`
+  the client for you:
+
+  .. code-block:: python
+
+      from telethon import TelegramClient, sync
+
+      with TelegramClient(name, api_id, api_hash) as client:
+          client.send_message('me', 'Hello!')
+
+  Convenience at its maximum! You can even chain the `.start()
+  <telethon.client.auth.AuthMethods.start>` method since
+  it returns the instance of the client:
+
+  .. code-block:: python
+
+      with TelegramClient(name, api_id, api_hash).start(bot_token=token) as bot:
+          bot.send_message(chat, 'Hello!')
+
+
+Bug fixes
+~~~~~~~~~
+
+- There were some ``@property async def`` left, and some ``await property``.
+- "User joined" event was being treated as "User was invited".
+- SQLite's cursor should not be closed properly after usage.
+- ``await`` the updates task upon disconnection.
+- Some bug in Python 3.5.2's ``asyncio`` causing 100% CPU load if you
+  forgot to call `client.disconnect()
+  <telethon.client.telegrambaseclient.TelegramBaseClient.disconnect>`.
+  The method is called for you on object destruction, but you still should
+  disconnect manually or use a ``with`` block.
+- Some fixes regarding disconnecting on client deletion and properly
+  saving the authorization key.
+- Passing a class to `message.get_entities_text
+  <telethon.tl.custom.message.Message.get_entities_text>` now works properly.
+- Iterating messages from a specific user in private messages now works.
+
+Enhancements
+~~~~~~~~~~~~
+
+- Both `client.start() <telethon.client.auth.AuthMethods.start>` and
+  `client.run_until_disconnected()
+  <telethon.client.updates.UpdateMethods.run_until_disconnected>` can
+  be ran in both a synchronous way (without starting the loop manually)
+  or from an ``async def`` where they need to have an ``await``.
+
+
+Core Rewrite in asyncio (v1.0-rc1)
+==================================
+
+*Published at 2018/06/24*
+
++-----------------------+
+| Scheme layer used: 81 |
++-----------------------+
+
+This version is a major overhaul of the library internals. The core has
+been rewritten, cleaned up and refactored to fix some oddities that have
+been growing inside the library.
+
+This means that the code is easier to understand and reason about,
+including the code flow such as conditions, exceptions, where to
+reconnect, how the library should behave, and separating different
+retry types such as disconnections or call fails, but it also means
+that **some things will necessarily break** in this version.
+
+All requests that touch the network are now methods and need to
+have their ``await`` (or be ran until their completion).
+
+Also, the library finally has the simple logo it deserved: a carefully
+hand-written ``.svg`` file representing a T following Python's colours.
+
+
+Breaking Changes
+~~~~~~~~~~~~~~~~
+
+- If you relied on internals like the ``MtProtoSender`` and the
+  ``TelegramBareClient``, both are gone. They are now `MTProtoSender
+  <telethon.network.mtprotosender.MTProtoSender>` and `TelegramBaseClient
+  <telethon.client.telegrambaseclient.TelegramBaseClient>` and they behave
+  differently.
+- Underscores have been renamed from filenames. This means
+  ``telethon.errors.rpc_error_list`` won't work, but you should
+  have been using `telethon.errors` all this time instead.
+- `client.connect <telethon.client.telegrambaseclient.TelegramBaseClient.connect>`
+  no longer returns ``True`` on success. Instead, you should ``except`` the
+  possible ``ConnectionError`` and act accordingly. This makes it easier to
+  not ignore the error.
+- You can no longer set ``retries=n`` when calling a request manually. The
+  limit works differently now, and it's done on a per-client basis.
+- Accessing `.sender <telethon.tl.custom.message.Message.sender>`,
+  `.chat <telethon.tl.custom.message.Message.chat>` and similar may *not* work
+  in events anymore, since previously they could access the network. The new
+  rule is that properties are not allowed to make API calls. You should use
+  `.get_sender() <telethon.tl.custom.message.Message.get_sender>`,
+  `.get_chat() <telethon.tl.custom.message.Message.get_chat>` instead while
+  using events. You can safely access properties if you get messages through
+  `client.get_messages() <telethon.client.messages.MessageMethods.get_messages>`
+  or other methods in the client.
+- The above point means ``reply_message`` is now `.get_reply_message()
+  <telethon.tl.custom.message.Message.get_reply_message>`, and ``fwd_from_entity``
+  is now `get_fwd_sender() <telethon.tl.custom.message.Message.get_fwd_sender>`.
+  Also ``forward`` was gone in the previous version, and you should be using
+  ``fwd_from`` instead.
+
+
+Additions
+~~~~~~~~~
+
+- Telegram's Terms Of Service are now accepted when creating a new account.
+  This can possibly help avoid bans. This has no effect for accounts that
+  were created before.
+- The `method reference <https://lonamiwebs.github.io/Telethon/>`_ now shows
+  which methods can be used if you sign in with a ``bot_token``.
+- There's a new `client.disconnected
+  <telethon.client.telegrambaseclient.TelegramBaseClient.disconnected>` future
+  which you can wait on. When a disconnection occurs, you will now, instead
+  letting it happen in the background.
+- More configurable retries parameters, such as auto-reconnection, retries
+  when connecting, and retries when sending a request.
+- You can filter `events.NewMessage <telethon.events.newmessage.NewMessage>`
+  by sender ID, and also whether they are forwards or not.
+- New ``ignore_migrated`` parameter for `client.iter_dialogs
+  <telethon.client.dialogs.DialogMethods.iter_dialogs>`.
+
+Bug fixes
+~~~~~~~~~
+
+- Several fixes to `telethon.events.newmessage.NewMessage`.
+- Removed named ``length`` argument in ``to_bytes`` for PyPy.
+- Raw events failed due to not having ``._set_client``.
+- `message.get_entities_text
+  <telethon.tl.custom.message.Message.get_entities_text>` properly
+  supports filtering, even if there are no message entities.
+- `message.click <telethon.tl.custom.message.Message.click>` works better.
+- The server started sending :tl:`DraftMessageEmpty` which the library
+  didn't handle correctly when getting dialogs.
+- The "correct" chat is now always returned from returned messages.
+- ``to_id`` was not validated when retrieving messages by their IDs.
+- ``'__'`` is no longer considered valid in usernames.
+- The ``fd`` is removed from the reader upon closing the socket. This
+  should be noticeable in Windows.
+- :tl:`MessageEmpty` is now handled when searching messages.
+- Fixed a rare infinite loop bug in `client.iter_dialogs
+  <telethon.client.dialogs.DialogMethods.iter_dialogs>` for some people.
+- Fixed ``TypeError`` when there is no `.sender
+  <telethon.tl.custom.message.Message.sender>`.
+
+Enhancements
+~~~~~~~~~~~~
+
+- You can now delete over 100 messages at once with `client.delete_messages
+  <telethon.client.messages.MessageMethods.delete_messages>`.
+- Signing in now accounts for ``AuthRestartError`` itself, and also handles
+  ``PasswordHashInvalidError``.
+- ``__all__`` is now defined, so ``from telethon import *`` imports sane
+  defaults (client, events and utils). This is however discouraged and should
+  be used only in quick scripts.
+- ``pathlib.Path`` is now supported for downloading and uploading media.
+- Messages you send to yourself are now considered outgoing, unless they
+  are forwarded.
+- The documentation has been updated with a brand new ``asyncio`` crash
+  course to encourage you use it. You can still use the threaded version
+  if you want though.
+- ``.name`` property is now properly supported when sending and downloading
+  files.
+- Custom ``parse_mode``, which can now be set per-client, support
+  :tl:`MessageEntityMentionName` so you can return those now.
+- The session file is saved less often, which could result in a noticeable
+  speed-up when working with a lot of incoming updates.
+
+
+Internal changes
+~~~~~~~~~~~~~~~~
+
+- The flow for sending a request is as follows: the ``TelegramClient`` creates
+  a ``MTProtoSender`` with a ``Connection``, and the sender starts send and
+  receive loops. Sending a request means enqueueing it in the sender, which
+  will eventually pack and encrypt it with its ``ConnectionState`` instead
+  of using the entire ``Session`` instance. When the data is packed, it will
+  be sent over the ``Connection`` and ultimately over the ``TcpClient``.
+
+- Reconnection occurs at the ``MTProtoSender`` level, and receiving responses
+  follows a similar process, but now ``asyncio.Future`` is used for the results
+  which are no longer part of all ``TLObject``, instead are part of the
+  ``TLMessage`` which simplifies things.
+
+- Objects can no longer be ``content_related`` and instead subclass
+  ``TLRequest``, making the separation of concerns easier.
+
+- The ``TelegramClient`` has been split into several mixin classes to avoid
+  having a 3,000-lines-long file with all the methods.
+
+- More special cases in the ``MTProtoSender`` have been cleaned up, and also
+  some attributes from the ``Session`` which didn't really belong there since
+  they weren't being saved.
+
+- The ``telethon_generator/`` can now convert ``.tl`` files into ``.json``,
+  mostly as a proof of concept, but it might be useful for other people.
+
+
+Custom Message class (v0.19.1)
+==============================
+
+*Published at 2018/06/03*
+
++-----------------------+
+| Scheme layer used: 80 |
++-----------------------+
+
+
+This update brings a new `telethon.tl.custom.message.Message` object!
+
+All the methods in the `telethon.telegram_client.TelegramClient` that
+used to return a :tl:`Message` will now return this object instead, which
+means you can do things like the following:
+
+.. code-block:: python
+
+    msg = client.send_message(chat, 'Hello!')
+    msg.edit('Hello there!')
+    msg.reply('Good day!')
+    print(msg.sender)
+
+Refer to its documentation to see all you can do, again, click
+`telethon.tl.custom.message.Message` to go to its page.
+
+
+Breaking Changes
+~~~~~~~~~~~~~~~~
+
+- The `telethon.network.connection.common.Connection` class is now an ABC,
+  and the old ``ConnectionMode`` is now gone. Use a specific connection (like
+  `telethon.network.connection.tcpabridged.ConnectionTcpAbridged`) instead.
+
+Additions
+~~~~~~~~~
+
+- You can get messages by their ID with
+  `telethon.telegram_client.TelegramClient.get_messages`'s ``ids`` parameter:
+
+  .. code-block:: python
+
+      message = client.get_messages(chats, ids=123)  # Single message
+      message_list = client.get_messages(chats, ids=[777, 778])  # Multiple
+
+- More convenience properties for `telethon.tl.custom.dialog.Dialog`.
+- New default `telethon.telegram_client.TelegramClient.parse_mode`.
+- You can edit the media of messages that already have some media.
+- New dark theme in the online ``tl`` reference, check it out at
+  https://lonamiwebs.github.io/Telethon/.
+
+Bug fixes
+~~~~~~~~~
+
+- Some IDs start with ``1000`` and these would be wrongly treated as channels.
+- Some short usernames like ``@vote`` were being ignored.
+- `telethon.telegram_client.TelegramClient.iter_messages`'s ``from_user``
+  was failing if no filter had been set.
+- `telethon.telegram_client.TelegramClient.iter_messages`'s ``min_id/max_id``
+  was being ignored by Telegram. This is now worked around.
+- `telethon.telegram_client.TelegramClient.catch_up` would fail with empty
+  states.
+- `telethon.events.newmessage.NewMessage` supports ``incoming=False``
+  to indicate ``outgoing=True``.
+
+Enhancements
+~~~~~~~~~~~~
+
+- You can now send multiple requests at once while preserving the order:
+
+  .. code-block:: python
+
+      from telethon.tl.functions.messages import SendMessageRequest
+      client([SendMessageRequest(chat, 'Hello 1!'),
+              SendMessageRequest(chat, 'Hello 2!')], ordered=True)
+
+Internal changes
+~~~~~~~~~~~~~~~~
+
+- ``without rowid`` is not used in SQLite anymore.
+- Unboxed serialization would fail.
+- Different default limit for ``iter_messages`` and ``get_messages``.
+- Some clean-up in the ``telethon_generator/`` package.
+
+
+Catching up on Updates (v0.19)
+==============================
+
+*Published at 2018/05/07*
+
++-----------------------+
+| Scheme layer used: 76 |
++-----------------------+
+
+This update prepares the library for catching up with updates with the new
+`telethon.telegram_client.TelegramClient.catch_up` method. This feature needs
+more testing, but for now it will let you "catch up" on some old updates that
+occurred while the library was offline, and brings some new features and bug
+fixes.
+
+
+Additions
+~~~~~~~~~
+
+- Add ``search``, ``filter`` and ``from_user`` parameters to
+  `telethon.telegram_client.TelegramClient.iter_messages`.
+- `telethon.telegram_client.TelegramClient.download_file` now
+  supports a ``None`` path to return the file in memory and
+  return its ``bytes``.
+- Events now have a ``.original_update`` field.
+
+Bug fixes
+~~~~~~~~~
+
+- Fixed a race condition when receiving items from the network.
+- A disconnection is made when "retries reached 0". This hasn't been
+  tested but it might fix the bug.
+- ``reply_to`` would not override :tl:`Message` object's reply value.
+- Add missing caption when sending :tl:`Message` with media.
+
+Enhancements
+~~~~~~~~~~~~
+
+- Retry automatically on ``RpcCallFailError``. This error happened a lot
+  when iterating over many messages, and retrying often fixes it.
+- Faster `telethon.telegram_client.TelegramClient.iter_messages` by
+  sleeping only as much as needed.
+- `telethon.telegram_client.TelegramClient.edit_message` now supports
+  omitting the entity if you pass a :tl:`Message`.
+- `telethon.events.raw.Raw` can now be filtered by type.
+
+Internal changes
+~~~~~~~~~~~~~~~~
+
+- The library now distinguishes between MTProto and API schemas.
+- :tl:`State` is now persisted to the session file.
+- Connection won't retry forever.
+- Fixed some errors and cleaned up the generation of code.
+- Fixed typos and enhanced some documentation in general.
+- Add auto-cast for :tl:`InputMessage` and :tl:`InputLocation`.
+
+
 Pickle-able objects (v0.18.3)
 =============================
 
